@@ -26,7 +26,7 @@ for s in symbols:
     d = build_indicators(raw)
     d["symbol"] = s
     d["basic"] = get_base_asset(s)
-    d["raw"] = raw  # сохраняем сырые данные для графика
+    d["raw"] = raw
     score = score_signal(d)
     print(f"{s} score = {score}")
 
@@ -51,19 +51,20 @@ if not filtered:
 filtered.sort(key=lambda x: x["score"], reverse=True)
 best = filtered[0]
 
-print("Generating post for", best["symbol"])
-post = write_post(best)
-print("POST:", post)
+print("Generating article for", best["symbol"])
+title, post_text = write_post(best)
+print(f"TITLE: {title}")
+print("TEXT:", post_text)
 
-# Генерируем график
-chart_path = generate_chart(best["symbol"], best["raw"], best["basic"])
-if chart_path:
-    print(f"[CHART] Chart generated: {chart_path}")
+# Генерируем график для обложки
+cover_path = generate_chart(best["symbol"], best["raw"], best["basic"])
+if cover_path:
+    print(f"[CHART] Cover generated: {cover_path}")
 else:
-    print("[CHART] Chart generation failed, posting text only.")
+    print("[CHART] Cover generation failed, posting without cover.")
 
-# Публикуем с графиком (если есть)
-success = publish(post, image_path=chart_path)
+# Публикуем статью с обложкой
+success = publish(post_text, title=title, cover_path=cover_path)
 
 if success:
     add_published(best["symbol"])
@@ -71,6 +72,6 @@ if success:
 else:
     print("Publication failed, not saving symbol.")
 
-# Удаляем временный график (если создан)
-if chart_path and os.path.exists(chart_path):
-    os.remove(chart_path)
+# Удаляем временный файл
+if cover_path and os.path.exists(cover_path):
+    os.remove(cover_path)
