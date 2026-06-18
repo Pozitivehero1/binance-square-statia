@@ -15,7 +15,14 @@ SYMBOLS = [
     "SOLUSDT",
     "BNBUSDT",
     "XRPUSDT",
-    # добавьте свои
+    "RIVERUSDT",
+    "DASHUSDT",
+    "LABUSDT",
+    "ASTERUSDT",
+    "DUSKUSDT",
+    "GUNUSDT",
+    "DOGEUSDT",
+    "WLDUSDT",
 ]
 
 # Папка с обложками
