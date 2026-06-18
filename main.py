@@ -3,40 +3,33 @@ from indicators import build_indicators
 from filters import score_signal
 from writer import write_post
 from publisher import publish
-from trend import get_base_asset  # оставляем для получения правильного тикера
+from trend import get_base_asset
 from history import get_recently_published, add_published, cleanup_history
 import os
 
-# ========== НАСТРОЙКА ==========
-# Список монет для анализа (пары USDT)
+# Список монет для анализа (указываешь вручную)
 SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT",
-    "XRPUSDT",
-    "RIVERUSDT",
-    "DASHUSDT",
-    "LABUSDT",
-    "ASTERUSDT",
-    "DUSKUSDT",
-    "GUNUSDT",
-    "DOGEUSDT",
-    "WLDUSDT",
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "RIVERUSDT", "DASHUSDT", "LABUSDT", "ASTERUSDT",
+    "DUSKUSDT", "GUNUSDT", "DOGEUSDT", "WLDUSDT"
 ]
 
-# Папка с обложками
-COVERS_DIR = "covers"
-
-# Минимальный скор для публикации
-MIN_SCORE = 4
-
-# ================================
+def get_cover_path(basic):
+    """Ищет обложку в папке covers/ по базовому имени токена."""
+    cover_dir = "covers"
+    if not os.path.exists(cover_dir):
+        return None
+    # Пробуем разные расширения
+    for ext in ['.png', '.jpg', '.jpeg', '.gif']:
+        path = os.path.join(cover_dir, f"{basic}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
 
 cleanup_history()
 
 print("BOT STARTED")
-print(f"Analyzing symbols: {SYMBOLS}")
+print("Analyzing symbols:", SYMBOLS)
 
 candidates = []
 
@@ -49,12 +42,11 @@ for s in SYMBOLS:
 
     d = build_indicators(raw)
     d["symbol"] = s
-    d["basic"] = get_base_asset(s)  # короткий тикер (BTC, ETH...)
-    d["raw"] = raw  # для возможного использования (не для графика)
+    d["basic"] = get_base_asset(s)   # например, DUSK
     score = score_signal(d)
     print(f"{s} score = {score}")
 
-    if score >= MIN_SCORE:
+    if score >= 4:
         d["score"] = score
         candidates.append(d)
 
@@ -63,7 +55,6 @@ if not candidates:
     print("No good setups found")
     exit()
 
-# Исключаем недавно опубликованные
 recent = get_recently_published(minutes=180)
 print(f"Recently published (last 3h): {recent}")
 
@@ -73,26 +64,20 @@ if not filtered:
     print("All candidates were published recently. Skipping.")
     exit()
 
-# Выбираем лучшего по скору
 filtered.sort(key=lambda x: x["score"], reverse=True)
 best = filtered[0]
 
 print("Generating article for", best["symbol"])
-
-# Генерируем статью (заголовок + текст)
 title, post_text = write_post(best)
 print(f"TITLE: {title}")
 print("TEXT:", post_text)
 
-# Ищем обложку в папке covers/
-cover_path = None
-cover_filename = f"{best['basic']}.png"  # например, BTC.png
-cover_full_path = os.path.join(COVERS_DIR, cover_filename)
-if os.path.exists(cover_full_path):
-    cover_path = cover_full_path
+# Ищем обложку
+cover_path = get_cover_path(best["basic"])
+if cover_path:
     print(f"[COVER] Using cover: {cover_path}")
 else:
-    print(f"[COVER] Cover not found for {best['basic']}, posting without cover.")
+    print("[COVER] No cover found for this token, posting without cover.")
 
 # Публикуем статью
 success = publish(post_text, title=title, cover_path=cover_path)
