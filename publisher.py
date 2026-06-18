@@ -1,8 +1,15 @@
 import subprocess
 import os
 
-def publish(text, image_path=None):
-    """Публикует пост через официальный навык Binance Square."""
+def publish(text, title, cover_path=None):
+    """
+    Публикует статью на Binance Square через официальный навык.
+    
+    Args:
+        text: Текст статьи
+        title: Заголовок статьи
+        cover_path: Путь к изображению обложки (опционально)
+    """
     skill_dir = find_skill_dir()
     if not skill_dir:
         print("[PUBLISH] Skill not found.")
@@ -18,14 +25,17 @@ def publish(text, image_path=None):
     env = os.environ.copy()
     env["BINANCE_SQUARE_OPENAPI_KEY"] = api_key
 
-    if image_path and os.path.exists(image_path):
-        script = os.path.join(skill_dir, "scripts", "post-image.mjs")
-        cmd = ["node", script, "--text", text, "--images", image_path]
-        print(f"[PUBLISH] Running image post: {' '.join(cmd)}")
+    # Используем post-image.mjs для статей с обложкой
+    script = os.path.join(skill_dir, "scripts", "post-image.mjs")
+    
+    # Формируем команду для статьи
+    if cover_path and os.path.exists(cover_path):
+        cmd = ["node", script, "--text", text, "--title", title, "--cover", cover_path]
+        print(f"[PUBLISH] Publishing article with cover: {' '.join(cmd)}")
     else:
-        script = os.path.join(skill_dir, "scripts", "post-text.mjs")
-        cmd = ["node", script, "--text", text]
-        print(f"[PUBLISH] Running text post: {' '.join(cmd)}")
+        # Без обложки — просто текстовая статья
+        cmd = ["node", script, "--text", text, "--title", title]
+        print(f"[PUBLISH] Publishing article without cover: {' '.join(cmd)}")
 
     try:
         result = subprocess.run(
@@ -39,6 +49,8 @@ def publish(text, image_path=None):
         print("[PUBLISH] STDOUT:", result.stdout)
         if result.stderr:
             print("[PUBLISH] STDERR:", result.stderr)
+        
+        # Проверяем успешность
         if "Success!" in result.stdout or "Content ID" in result.stdout:
             return True
         return result.returncode == 0
@@ -49,7 +61,6 @@ def publish(text, image_path=None):
 
 def find_skill_dir():
     """Ищет директорию установленного навыка square-post."""
-    # Пути внутри рабочей директории (где выполняется checkout)
     base_paths = [
         os.getenv("GITHUB_WORKSPACE", "."),
         ".",
@@ -59,7 +70,6 @@ def find_skill_dir():
         if os.path.exists(os.path.join(candidate, "scripts", "post-image.mjs")):
             return candidate
 
-    # Альтернативные пути
     alt_paths = [
         os.path.expanduser("~/.agents/skills/square-post"),
         "./node_modules/@binance/square-post",
