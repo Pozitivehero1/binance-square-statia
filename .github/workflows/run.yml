@@ -1,0 +1,49 @@
+name: Binance BotStat
+
+on:
+
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Binance Square Skill
+        run: |
+          npx skills add https://github.com/binance/binance-skills-hub --skill square-post -y
+          mkdir -p ~/.config/binance-square
+          echo -n "${{ secrets.SQUARE_API }}" > ~/.config/binance-square/openapi-key
+
+      - name: Debug skill installation
+        run: |
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          ls -la $GITHUB_WORKSPACE/.agents/skills/square-post/scripts/ || echo "Not found in GITHUB_WORKSPACE"
+          ls -la ./.agents/skills/square-post/scripts/ || echo "Not found in ./"
+          find . -name "post-image.mjs" -o -name "post-text.mjs" 2>/dev/null || echo "No scripts found"
+
+      - name: Cache published history
+        uses: actions/cache@v3
+        with:
+          path: published_history.json
+          key: published-history-${{ github.run_id }}
+          restore-keys: |
+            published-history-
+
+      - run: pip install -r requirements.txt
+
+      - run: python main.py
+        env:
+          MISTRAL_API: ${{ secrets.MISTRAL_API }}
+          SQUARE_API: ${{ secrets.SQUARE_API }}
+          BINANCE_SQUARE_OPENAPI_KEY: ${{ secrets.SQUARE_API }}
