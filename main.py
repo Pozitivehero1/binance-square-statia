@@ -15,15 +15,14 @@ SYMBOLS = [
 ]
 
 def get_cover_path(basic):
-    """Ищет обложку в папке covers/ по базовому имени токена."""
-    cover_dir = "covers/"
+    """Ищет обложку в папке covers/ и возвращает абсолютный путь."""
+    cover_dir = "covers"
     if not os.path.exists(cover_dir):
         return None
-    # Пробуем разные расширения
     for ext in ['.png', '.jpg', '.jpeg', '.gif']:
         path = os.path.join(cover_dir, f"{basic}{ext}")
         if os.path.exists(path):
-            return path
+            return os.path.abspath(path)
     return None
 
 cleanup_history()
