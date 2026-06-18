@@ -16,7 +16,7 @@ SYMBOLS = [
 
 def get_cover_path(basic):
     """Ищет обложку в папке covers/ по базовому имени токена."""
-    cover_dir = "covers"
+    cover_dir = "binance-square-statia/covers/"
     if not os.path.exists(cover_dir):
         return None
     # Пробуем разные расширения
