@@ -46,7 +46,7 @@ for s in SYMBOLS:
     score = score_signal(d)
     print(f"{s} score = {score}")
 
-    if score >= 2:
+    if score >= 3:
         d["score"] = score
         candidates.append(d)
 
