@@ -24,7 +24,6 @@ def get_cover_path(basic):
         if os.path.exists(path):
             return os.path.abspath(path)
     return None
-
 cleanup_history()
 
 print("BOT STARTED")
