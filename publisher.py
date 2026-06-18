@@ -20,12 +20,12 @@ def publish(text, title, cover_path=None):
 
     script = os.path.join(skill_dir, "scripts", "post-image.mjs")
     
-    # Проверяем, существует ли файл обложки
+    # Если есть обложка — делаем абсолютный путь
     if cover_path and os.path.exists(cover_path):
-        cmd = ["node", script, "--text", text, "--title", title, "--cover", cover_path]
+        abs_cover_path = os.path.abspath(cover_path)
+        cmd = ["node", script, "--text", text, "--title", title, "--cover", abs_cover_path]
         print(f"[PUBLISH] Publishing article with cover: {' '.join(cmd)}")
     else:
-        # Без обложки
         cmd = ["node", script, "--text", text, "--title", title]
         print(f"[PUBLISH] Publishing article without cover: {' '.join(cmd)}")
 
