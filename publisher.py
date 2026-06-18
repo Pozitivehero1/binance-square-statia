@@ -2,14 +2,7 @@ import subprocess
 import os
 
 def publish(text, title, cover_path=None):
-    """
-    Публикует статью на Binance Square через официальный навык.
-    
-    Args:
-        text: Текст статьи
-        title: Заголовок статьи
-        cover_path: Путь к изображению обложки (опционально)
-    """
+    """Публикует статью на Binance Square через официальный навык."""
     skill_dir = find_skill_dir()
     if not skill_dir:
         print("[PUBLISH] Skill not found.")
@@ -25,15 +18,14 @@ def publish(text, title, cover_path=None):
     env = os.environ.copy()
     env["BINANCE_SQUARE_OPENAPI_KEY"] = api_key
 
-    # Используем post-image.mjs для статей с обложкой
     script = os.path.join(skill_dir, "scripts", "post-image.mjs")
     
-    # Формируем команду для статьи
+    # Проверяем, существует ли файл обложки
     if cover_path and os.path.exists(cover_path):
         cmd = ["node", script, "--text", text, "--title", title, "--cover", cover_path]
         print(f"[PUBLISH] Publishing article with cover: {' '.join(cmd)}")
     else:
-        # Без обложки — просто текстовая статья
+        # Без обложки
         cmd = ["node", script, "--text", text, "--title", title]
         print(f"[PUBLISH] Publishing article without cover: {' '.join(cmd)}")
 
@@ -50,7 +42,6 @@ def publish(text, title, cover_path=None):
         if result.stderr:
             print("[PUBLISH] STDERR:", result.stderr)
         
-        # Проверяем успешность
         if "Success!" in result.stdout or "Content ID" in result.stdout:
             return True
         return result.returncode == 0
