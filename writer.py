@@ -1,12 +1,9 @@
 import requests
 import os
-import json
 
 MISTRAL_API = os.getenv("MISTRAL_API")
 
-
 def write_post(data):
-
     prompt = f"""
 Ты опытный автор Binance Square.
 
@@ -58,24 +55,14 @@ ATR:
 - пиши как живой аналитик
 - не используй списки кроме блока уровней
 - не используй эмодзи
+- перед упоминанием монеты ставь знак $, не больше 3 упоминаний в тексте (например $BTC)
+- не разделяй блоки черточками
 - не используй хештеги
-- не разделяяй блоки черточками
-- перед упоминанием монеты ставь знак $, но не более 3 в одном посте (например $BTC)
 - не используй слова:
   возможно
   вероятно
   скорее всего
   может быть
-  Запрещено придумывать:
-
-- новости
-- обновления проекта
-- листинги
-- партнерства
-- заявления команды
-
-Если информация не была передана во входных данных,
-не упоминай её.
 
 - не упоминай индикаторы подряд
 
@@ -112,17 +99,11 @@ RSI = 65
 
 1200-1800 символов
 
-Верни ТОЛЬКО JSON.
+Верни готовую статью в виде:
+ЗАГОЛОВОК: [твой заголовок]
+ТЕКСТ: [текст статьи]
+"""
 
-{
-  "title": "...",
-  "content": "..."
-}
-
-Никакого дополнительного текста.
-Никаких markdown блоков.
-Никаких комментариев.
-}
     r = requests.post(
         "https://api.mistral.ai/v1/chat/completions",
         headers={
@@ -131,42 +112,30 @@ RSI = 65
         },
         json={
             "model": "mistral-small",
-            "temperature": 0.85,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
+            "messages": [{"role": "user", "content": prompt}]
         },
-        timeout=90
+        timeout=60
     )
 
     response = r.json()
-
-  content = response["choices"][0]["message"]["content"]
-
-parsed = json.loads(content)
-
-title = parsed["title"]
-text = parsed["content"]
-
+    content = response["choices"][0]["message"]["content"]
+    
+    # Парсим заголовок и текст
+    title = ""
+    text = content
     if "ЗАГОЛОВОК:" in content:
-
         parts = content.split("ЗАГОЛОВОК:", 1)
-
         if len(parts) > 1:
-
             title_part = parts[1].split("ТЕКСТ:", 1)
-
             if len(title_part) > 1:
                 title = title_part[0].strip()
                 text = title_part[1].strip()
             else:
                 title = title_part[0].strip()
-
-    for ch in ["*", "_", "`", "#"]:
-        title = title.replace(ch, "")
-        text = text.replace(ch, "")
+    
+    # Очистка от случайного форматирования
+    for ch in ['*', '_', '`', '#']:
+        text = text.replace(ch, '')
+        title = title.replace(ch, '')
 
     return title, text
