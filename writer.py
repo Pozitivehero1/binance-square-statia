@@ -122,7 +122,7 @@ RSI = 65
 Никакого дополнительного текста.
 Никаких markdown блоков.
 Никаких комментариев.
-
+}
     r = requests.post(
         "https://api.mistral.ai/v1/chat/completions",
         headers={
