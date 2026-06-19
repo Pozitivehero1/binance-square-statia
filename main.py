@@ -52,7 +52,7 @@ for s in SYMBOLS:
 )
     print(f"{s} score = {score}")
 
-    if score >= 7:
+    if score >= 5:
         d["score"] = score
         candidates.append(d)
 
