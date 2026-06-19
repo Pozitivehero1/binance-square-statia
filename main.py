@@ -45,9 +45,14 @@ for s in SYMBOLS:
     d["symbol"] = s
     d["basic"] = get_base_asset(s)   # например, DUSK
     score = score_signal(d)
+    print(
+    f"RSI={d['rsi']:.1f} "
+    f"VOL={d['volume_ratio']:.2f} "
+    f"SCORE={score}"
+)
     print(f"{s} score = {score}")
 
-    if score >= 3:
+    if score >= 7:
         d["score"] = score
         candidates.append(d)
 
