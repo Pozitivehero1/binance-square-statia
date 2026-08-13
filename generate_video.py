@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 
 DEFAULT_CFG = {
     "language": "en",
-    "niche": "technology, science and surprising true history",
+    "niche": "technology, science, engineering and everyday phenomena",
     "mistral_model": "mistral-small-latest",
     "voice": "en-US-AvaMultilingualNeural",
     "voice_rate": "-3%",
@@ -40,6 +40,11 @@ DEFAULT_CFG = {
     "caption_font_size": 46,
     "caption_margin_v": 300,
     "caption_margin_lr": 105,
+    "narration_target_min": 175,
+    "narration_target_max": 225,
+    "narration_hard_min": 130,
+    "narration_hard_max": 250,
+    "preproduction_attempts": 5,
 }
 
 def load_json_or_default(path: Path, default):
@@ -72,14 +77,15 @@ WORK.mkdir(exist_ok=True)
 UA = {
     "User-Agent": os.getenv(
         "WIKIMEDIA_USER_AGENT",
-        "TikTokAutoVideo/2.1 (educational-video-generator; contact: github-actions)"
+        "TikTokAutoVideo/2.4 (educational-video-generator; contact: github-actions)"
     ),
     "Api-User-Agent": os.getenv(
         "WIKIMEDIA_USER_AGENT",
-        "TikTokAutoVideo/2.1 (educational-video-generator; contact: github-actions)"
+        "TikTokAutoVideo/2.4 (educational-video-generator; contact: github-actions)"
     ),
 }
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+WIKIPEDIA_DISABLED_THIS_RUN = False
 
 
 def log(msg: str) -> None:
@@ -127,10 +133,13 @@ def _topic_terms(text: str) -> List[str]:
 def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
     """Best-effort Wikimedia request.
 
-    GitHub-hosted runners use shared egress IPs and Wikipedia can return a long Retry-After.
-    Retrying immediately only burns a minute and almost guarantees another 429, so a 429 is
-    treated as a signal to fall back to the Mistral fact brief for this run.
+    GitHub-hosted runners share egress IPs. If Wikimedia returns 429 once, disable it for the
+    rest of the current run instead of repeatedly hitting the same shared-IP rate limit.
     """
+    global WIKIPEDIA_DISABLED_THIS_RUN
+    if WIKIPEDIA_DISABLED_THIS_RUN:
+        raise RuntimeError("Wikipedia disabled for this run after an earlier 429")
+
     last_error: Exception | None = None
     for attempt, delay in enumerate((0, 2), 1):
         if delay:
@@ -142,7 +151,8 @@ def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
             )
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After", "")
-                log("Wikipedia rate-limited (429)" + (f"; Retry-After={retry_after}" if retry_after else "") + "; skipping Wikipedia for this run.")
+                WIKIPEDIA_DISABLED_THIS_RUN = True
+                log("Wikipedia rate-limited (429)" + (f"; Retry-After={retry_after}" if retry_after else "") + "; disabling Wikipedia for the rest of this run.")
                 raise RuntimeError("Wikipedia rate-limited (429)")
             r.raise_for_status()
             return r.json()
@@ -154,7 +164,6 @@ def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
                 log(f"Wikipedia request failed, one retry: {e}")
                 continue
     raise RuntimeError(f"Wikipedia unavailable after retries: {last_error}")
-
 
 def mistral_source_brief(topic: Dict[str, str]) -> Tuple[str, str, str]:
     """Fallback when Wikimedia is rate-limited. Produces a conservative fact brief for evergreen topics."""
@@ -169,7 +178,8 @@ def mistral_source_brief(topic: Dict[str, str]) -> Tuple[str, str, str]:
             f"Search intent: {topic.get('search','')}.\n"
             "Use only widely established, non-controversial facts suitable for a short explainer. "
             "Avoid precise numbers, dates, named individuals, records, causal claims, or superlatives unless you are highly confident. "
-            "Do not broaden into namesakes or adjacent topics. "
+            "If something is debated or uncertain, either omit it or explicitly label the uncertainty in the atomic fact. "
+            "Do not broaden into namesakes, myths, mysteries, or adjacent topics. Prefer mechanisms and facts that can be explained visually. "
             "Return exactly {\"topic_match\":true/false,\"facts\":[\"atomic fact\",...],\"notes\":\"short caveat if needed\"}. "
             "Provide 10-18 atomic facts. If you cannot support the exact topic confidently, set topic_match=false."
         )}
@@ -238,6 +248,8 @@ def validate_source(topic: Dict[str, str], candidate: Dict[str, str]) -> Tuple[b
 
 
 def wikipedia_search(topic: Dict[str, str]) -> Tuple[str, str, str]:
+    if WIKIPEDIA_DISABLED_THIS_RUN:
+        return mistral_source_brief(topic)
     try:
         candidates = wikipedia_candidates(topic)
     except Exception as e:
@@ -274,21 +286,39 @@ def mistral_json(messages: List[Dict[str, str]], max_tokens: int = 1800, tempera
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    r = requests.post(
-        MISTRAL_URL,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json=payload, timeout=90,
-    )
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"]
-    if isinstance(content, list):
-        content = "".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in content)
-    return json.loads(content)
-
+    last_error: Exception | None = None
+    for attempt in range(1, 5):
+        try:
+            r = requests.post(
+                MISTRAL_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload, timeout=90,
+            )
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                retry_after = r.headers.get("Retry-After")
+                wait = min(20, int(retry_after)) if retry_after and retry_after.isdigit() else min(2 ** attempt, 12)
+                last_error = RuntimeError(f"Mistral HTTP {r.status_code}")
+                if attempt < 4:
+                    log(f"Mistral temporary error {r.status_code}; retrying in {wait}s ({attempt}/4)")
+                    time.sleep(wait)
+                    continue
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "".join(x.get("text", "") if isinstance(x, dict) else str(x) for x in content)
+            return json.loads(content)
+        except (requests.RequestException, KeyError, ValueError, json.JSONDecodeError) as e:
+            last_error = e
+            if attempt < 4:
+                wait = min(2 ** attempt, 12)
+                log(f"Mistral request/JSON error; retrying in {wait}s ({attempt}/4): {e}")
+                time.sleep(wait)
+                continue
+    raise RuntimeError(f"Mistral request failed after retries: {last_error}")
 
 def choose_topic() -> Dict[str, str]:
     forced = os.getenv("TOPIC", "").strip()
-    niche = os.getenv("NICHE", CFG.get("niche", "technology, science and surprising true history")).strip()
+    niche = os.getenv("NICHE", CFG.get("niche", "technology, science, engineering and everyday phenomena")).strip()
     if forced:
         return {"title": forced, "search": forced, "hook": ""}
 
@@ -306,7 +336,9 @@ def choose_topic() -> Dict[str, str]:
             {"role": "system", "content": "You select factual evergreen topics for short educational videos. Return JSON only."},
             {"role": "user", "content": (
                 f"Choose ONE high-curiosity evergreen topic for a 65-90 second English TikTok in this niche: {niche}. "
-                "It must be easy to illustrate with generic stock footage, have a reliable Wikipedia page, avoid politics, tragedy exploitation, medical advice, and investment advice. "
+                "Prefer everyday science, engineering, technology, animals, nature, or how-things-work topics. "
+                "It MUST be easy to illustrate truthfully with generic Pexels stock footage and must not depend on exact historical footage. "
+                "Avoid mystery/conspiracy framing, archaeology controversies, politics, tragedy exploitation, medical advice, and investment advice. "
                 f"Do not repeat these recent topics: {used[-20:]}. "
                 "Return JSON exactly like {\"title\":\"...\",\"search\":\"Wikipedia search phrase\",\"hook\":\"one punchy factual hook\"}."
             )}
@@ -326,64 +358,86 @@ def choose_topic() -> Dict[str, str]:
     return topic
 
 
-def rebalance_plan_length(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any], target_min: int = 185, target_max: int = 215) -> Dict[str, Any]:
-    """Rewrite only when Mistral misses the requested narration length.
-
-    Word count is a formatting problem, not a reason to throw away a good topic. The repair
-    pass preserves the same factual scope and scene order while expanding or compressing.
-    """
-    current_script = clean_text(" ".join(clean_text(str(x.get("narration", ""))) for x in (plan.get("scenes") or [])))
-    current_words = words(current_script)
-    if target_min <= current_words <= target_max:
-        return plan
-
-    log(f"Narration length repair: {current_words} words -> target {target_min}-{target_max}")
-    visual_plan = [
-        {
-            "narration": clean_text(str(x.get("narration", ""))),
-            "pexels_queries": [clean_text(str(q)) for q in (x.get("pexels_queries") or []) if clean_text(str(q))][:3],
-        }
-        for x in (plan.get("scenes") or [])
-    ]
-    repaired = mistral_json([
-        {"role": "system", "content": "You are a precision script-length editor. Return JSON only."},
-        {"role": "user", "content": (
-            f"Repair this short-video plan so TOTAL narration is {target_min}-{target_max} English words. "
-            "Keep the exact topic, same factual scope, and 14-18 scenes. Preserve supported facts; do not add unsupported facts, names, dates, numbers, motives, or causal claims. "
-            "If shortening, remove filler/repetition first. If expanding, explain already-supported facts more clearly instead of inventing new ones. "
-            "Keep each scene concise and keep or improve its Pexels queries. The first sentence must be a specific factual curiosity hook, not generic filler. "
-            "Return the same JSON shape with title, hook, caption, scenes.\n"
-            f"TOPIC: {topic.get('title','')}\nSOURCE LABEL: {source_title}\nSOURCE/FACT BRIEF: {extract[:12000]}\n"
-            f"CURRENT PLAN: {json.dumps({'title': plan.get('title',''), 'hook': plan.get('hook',''), 'caption': plan.get('caption',''), 'scenes': visual_plan}, ensure_ascii=False)}"
-        )}
-    ], max_tokens=3000, temperature=0.15)
-
-    scenes = repaired.get("scenes") or []
+def _normalize_plan_shape(topic: Dict[str, str], source_title: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    scenes = plan.get("scenes") or []
     if not 12 <= len(scenes) <= 20:
-        raise RuntimeError(f"Length repair returned invalid scene count: {len(scenes)}")
+        raise RuntimeError(f"Invalid scene count: {len(scenes)}")
     for scene in scenes:
         scene["narration"] = clean_text(str(scene.get("narration", "")))
         qs = [clean_text(str(q)) for q in (scene.get("pexels_queries") or []) if clean_text(str(q))]
         scene["pexels_queries"] = qs[:3] or [topic.get("search") or source_title]
-    repaired["title"] = clean_text(str(repaired.get("title", plan.get("title", topic.get("title", "")))))
-    repaired["hook"] = clean_text(str(repaired.get("hook", scenes[0].get("narration", "") if scenes else "")))
-    repaired["caption"] = clean_text(str(repaired.get("caption", plan.get("caption", repaired["title"]))))[:180]
-    final_words = words(" ".join(x.get("narration", "") for x in scenes))
-    # Give the repair pass a little tolerance. TTS duration is the final hard constraint.
-    if not 175 <= final_words <= 225:
-        raise RuntimeError(f"Narration length repair failed: {final_words} words")
-    log(f"Narration length repaired to {final_words} words")
-    return repaired
+    plan["title"] = clean_text(str(plan.get("title", topic.get("title", source_title))))
+    plan["hook"] = clean_text(str(plan.get("hook", scenes[0].get("narration", "") if scenes else "")))
+    plan["caption"] = clean_text(str(plan.get("caption", plan["title"])))[:180]
+    return plan
 
+
+def rebalance_plan_length(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any], target_min: int | None = None, target_max: int | None = None) -> Dict[str, Any]:
+    """Best-effort length repair without throwing away an otherwise usable topic.
+
+    Mistral sometimes overshoots or undershoots exact word-count instructions. We retry a few
+    times, keep the closest candidate, and accept a wider safe band. TTS duration remains the
+    final hard check.
+    """
+    target_min = int(target_min or CFG.get("narration_target_min", 175))
+    target_max = int(target_max or CFG.get("narration_target_max", 225))
+    hard_min = int(CFG.get("narration_hard_min", 130))
+    hard_max = int(CFG.get("narration_hard_max", 250))
+    center = (target_min + target_max) / 2
+
+    plan = _normalize_plan_shape(topic, source_title, plan)
+    best = plan
+    best_words = words(" ".join(x["narration"] for x in plan["scenes"]))
+    if target_min <= best_words <= target_max:
+        return plan
+
+    log(f"Narration length repair: {best_words} words -> target {target_min}-{target_max}")
+    current = plan
+    for attempt in range(1, 4):
+        visual_plan = [
+            {
+                "narration": clean_text(str(x.get("narration", ""))),
+                "pexels_queries": [clean_text(str(q)) for q in (x.get("pexels_queries") or []) if clean_text(str(q))][:3],
+            }
+            for x in current["scenes"]
+        ]
+        try:
+            repaired = mistral_json([
+                {"role": "system", "content": "You are a precision script-length editor. Return JSON only."},
+                {"role": "user", "content": (
+                    f"Rewrite this short-video plan so TOTAL narration is {target_min}-{target_max} English words. "
+                    "Use 14-18 scenes and aim for roughly 10-14 narration words per scene. "
+                    "Keep the exact topic and factual scope. Do not invent facts. Remove filler first when shortening; when expanding, clarify only facts already in the brief. "
+                    "Keep Pexels queries literal, stock-friendly, and truthful. Return the same JSON shape with title, hook, caption, scenes. "
+                    f"TOPIC: {topic.get('title','')}\nSOURCE LABEL: {source_title}\nSOURCE/FACT BRIEF: {extract[:12000]}\n"
+                    f"CURRENT PLAN: {json.dumps({'title': current.get('title',''), 'hook': current.get('hook',''), 'caption': current.get('caption',''), 'scenes': visual_plan}, ensure_ascii=False)}"
+                )}
+            ], max_tokens=3000, temperature=0.08)
+            repaired = _normalize_plan_shape(topic, source_title, repaired)
+            wc = words(" ".join(x["narration"] for x in repaired["scenes"]))
+            log(f"Narration repair attempt {attempt}: {wc} words")
+            if abs(wc - center) < abs(best_words - center):
+                best, best_words = repaired, wc
+            current = repaired
+            if target_min <= wc <= target_max:
+                log(f"Narration length repaired to {wc} words")
+                return repaired
+        except Exception as e:
+            log(f"Narration repair attempt {attempt} failed: {e}")
+
+    if hard_min <= best_words <= hard_max:
+        log(f"Narration repair missed exact target; accepting safe {best_words}-word plan (hard band {hard_min}-{hard_max}).")
+        return best
+    raise RuntimeError(f"Narration length repair failed: best candidate {best_words} words")
 
 def make_plan(topic: Dict[str, str], source_title: str, extract: str, feedback: str = "") -> Dict[str, Any]:
-    if len(extract) < 700:
-        raise RuntimeError(f"Wikipedia source is too short for: {source_title}")
+    if len(extract) < 400:
+        raise RuntimeError(f"Factual source/brief is too short for: {source_title}")
     prompt = f"""
 Create an original factual English short-video plan about THIS EXACT TOPIC: {topic.get('title','')}.
 The factual source/brief is: {source_title}.
 The video is for a faceless educational TikTok aimed at US/UK viewers.
-Target narration: 185-215 words, approximately 65-85 seconds.
+Target narration: 175-225 words, approximately 65-90 seconds.
 Use ONLY facts explicitly supported by the SOURCE/FACT BRIEF below. Never invent names, dates, numbers, quotes, motives, causal claims, or extra people merely because they share a name.
 DO NOT broaden the topic into unrelated people, places, namesakes, disambiguation entries, or trivia that is not central to the requested topic.
 Opening must create strong curiosity in the first 1-2 seconds while remaining factual.
@@ -401,14 +455,14 @@ Return JSON with this exact shape:
 }}
 
 Requirements:
-- 14 to 18 scenes so visuals change frequently.
+- 14 to 18 scenes so visuals change frequently. Aim for about 10-14 narration words per scene.
 - Every scene must advance the SAME topic.
 - Each pexels query must describe concrete visible things, 2-6 English words.
 - Prefer visually literal stock footage: objects, machines, workshops, landscapes, maps, hands, tools, laboratories, architecture.
 - When an exact historic object is unlikely on Pexels, request a truthful generic visual (for example 'vintage bicycle workshop'), not a misleading modern substitute pretending to be the historic object.
 - Do not request portraits of named historical people unless generic portraits are only atmospheric and narration does not imply identity.
 - Avoid logos, movie footage, celebrities, graphic content, modern visuals that falsely represent a historical event, and text-heavy footage.
-- Total narration must be 185-215 words.
+- Total narration should be 175-225 words. Never sacrifice factual accuracy just to hit an exact count.
 - Never use the word 'disambiguation' in title, caption, or narration.
 - Return valid JSON only.
 
@@ -422,23 +476,31 @@ SOURCE/FACT BRIEF ({source_title}):
         {"role": "user", "content": prompt},
     ], max_tokens=2800, temperature=0.42)
 
-    scenes = data.get("scenes") or []
-    if not 12 <= len(scenes) <= 20:
-        raise RuntimeError(f"Mistral returned invalid scene count: {len(scenes)}")
-    narrations = [clean_text(str(s.get("narration", ""))) for s in scenes]
-    total = words(" ".join(narrations))
-    for s in scenes:
-        qs = [clean_text(str(q)) for q in (s.get("pexels_queries") or []) if clean_text(str(q))]
-        s["pexels_queries"] = qs[:3] or [topic.get("search") or source_title]
-        s["narration"] = clean_text(str(s["narration"]))
-    data["title"] = clean_text(str(data.get("title", topic.get("title") or source_title)))
-    data["hook"] = clean_text(str(data.get("hook", narrations[0])))
-    data["caption"] = clean_text(str(data.get("caption", data["title"])))[:180]
+    data = _normalize_plan_shape(topic, source_title, data)
+    total = words(" ".join(s["narration"] for s in data["scenes"]))
     if "disambiguation" in (data["title"] + " " + data["caption"]).lower():
         raise RuntimeError("Plan drifted into disambiguation content")
-    if not 185 <= total <= 215:
-        data = rebalance_plan_length(topic, source_title, extract, data)
+    target_min = int(CFG.get("narration_target_min", 175))
+    target_max = int(CFG.get("narration_target_max", 225))
+    if not target_min <= total <= target_max:
+        data = rebalance_plan_length(topic, source_title, extract, data, target_min, target_max)
     return data
+
+
+def _demote_obvious_polish_from_fatal(fatal: List[str], polish: List[str]) -> Tuple[List[str], List[str]]:
+    polish_markers = (
+        "weak hook", "generic hook", "weak first sentence", "generic first sentence",
+        "repetitive filler", "repetition", "filler", "clich", "wording", "anthropomorph",
+        "too conversational", "retention", "punchy",
+    )
+    kept: List[str] = []
+    for issue in fatal:
+        low = issue.lower()
+        if any(m in low for m in polish_markers):
+            polish.append(issue)
+        else:
+            kept.append(issue)
+    return kept, polish
 
 
 def qa_plan(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -451,41 +513,96 @@ def qa_plan(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[s
         for s in plan.get("scenes", [])
     ]
     data = mistral_json([
-        {"role": "system", "content": "You are an adversarial fact-checking and retention editor. Return JSON only."},
+        {"role": "system", "content": "You are a practical fact-checker for short educational videos. Return JSON only."},
         {"role": "user", "content": (
-            "Audit this TikTok plan against the exact requested topic and supplied source/fact brief. "
-            "Fail it for real topic drift, unsupported factual claims, misleading stock-footage framing, a weak/generic first sentence, unrelated namesakes, or repetitive filler. "
-            "IMPORTANT: SOURCE TITLE/LABEL is metadata only. Never require the script to mention Wikipedia, Mistral, 'fact brief', the source label, or the research method. "
-            "Assess visual_coherence from the supplied Pexels queries: they should be truthful illustrative visuals, not exact historical footage unless the query can plausibly find it. "
-            "Do not penalize a visual merely for being illustrative when narration does not claim it is the exact person/object/event. "
+            "Audit this TikTok plan against the requested topic and supplied fact brief. Separate FATAL accuracy problems from POLISH suggestions. "
+            "Fatal issues are ONLY: a concrete factual claim unsupported/contradicted by the brief, major topic drift, or a visual query that falsely presents a modern/generic object as the exact named historical person/object/event. "
+            "Do NOT make weak hooks, ordinary metaphors, mild repetition, generic illustrative stock footage, or wording preferences fatal. Put those in polish_issues. "
+            "A generic stock visual is acceptable when it merely illustrates a concept and narration does not claim it is the exact historical footage. "
+            "Never require mention of Wikipedia, Mistral, source labels, research methods, or namesakes. Do not invent objections not grounded in the supplied brief. "
             f"REQUESTED TOPIC: {topic.get('title','')}\nSOURCE LABEL: {source_title}\nSOURCE/FACT BRIEF: {extract[:9000]}\n"
             f"PLAN TITLE: {plan.get('title','')}\nHOOK: {plan.get('hook','')}\nSCRIPT: {script}\n"
             f"SCENES + VISUAL QUERIES: {json.dumps(visual_plan, ensure_ascii=False)}\n"
-            "Return JSON exactly like {\"pass\":true/false,\"topic_relevance\":0-10,\"factual_grounding\":0-10,\"hook_strength\":0-10,\"visual_coherence\":0-10,\"issues\":[\"...\"]}."
+            'Return exactly {\"pass\":true/false,\"topic_relevance\":0-10,\"factual_grounding\":0-10,\"hook_strength\":0-10,\"visual_coherence\":0-10,\"fatal_issues\":[\"...\"],\"polish_issues\":[\"...\"]}. '
+            "Set pass=false only when there is at least one fatal issue or topic_relevance/factual_grounding is below 8."
         )}
-    ], max_tokens=650, temperature=0.0)
-    scores = [float(data.get(k, 0)) for k in ("topic_relevance", "factual_grounding", "hook_strength", "visual_coherence")]
-    data["pass"] = bool(data.get("pass")) and scores[0] >= 8 and scores[1] >= 8 and scores[2] >= 7 and scores[3] >= 7
+    ], max_tokens=800, temperature=0.0)
+    fatal = [clean_text(str(x)) for x in (data.get("fatal_issues") or []) if clean_text(str(x))]
+    polish = [clean_text(str(x)) for x in (data.get("polish_issues") or []) if clean_text(str(x))]
+    # Backward compatibility if the model emits the old key.
+    if not fatal and not polish and data.get("issues"):
+        polish = [clean_text(str(x)) for x in data.get("issues") if clean_text(str(x))]
+    fatal, polish = _demote_obvious_polish_from_fatal(fatal, polish)
+    rel = float(data.get("topic_relevance", 0))
+    fact = float(data.get("factual_grounding", 0))
+    hook = float(data.get("hook_strength", 0))
+    visual = float(data.get("visual_coherence", 0))
+    data["fatal_issues"] = fatal
+    data["polish_issues"] = polish
+    data["pass"] = (not fatal) and rel >= 8 and fact >= 8 and hook >= 6.5 and visual >= 6.5
+    data["publishable"] = data["pass"]
     return data
+
+
+def _qa_score(qa: Dict[str, Any]) -> float:
+    return (
+        3 * float(qa.get("factual_grounding", 0))
+        + 2 * float(qa.get("topic_relevance", 0))
+        + float(qa.get("hook_strength", 0))
+        + float(qa.get("visual_coherence", 0))
+        - 10 * len(qa.get("fatal_issues") or [])
+    )
+
 
 def build_validated_plan(topic: Dict[str, str], source_title: str, extract: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     feedback = ""
-    last_qa: Dict[str, Any] = {}
+    best_plan: Dict[str, Any] | None = None
+    best_qa: Dict[str, Any] | None = None
     for attempt in range(1, 4):
         plan = make_plan(topic, source_title, extract, feedback=feedback)
         last_qa = qa_plan(topic, source_title, extract, plan)
         log(f"Plan QA attempt {attempt}: {json.dumps(last_qa, ensure_ascii=False)}")
+        if best_qa is None or _qa_score(last_qa) > _qa_score(best_qa):
+            best_plan, best_qa = plan, last_qa
         if last_qa.get("pass"):
+            if last_qa.get("polish_issues"):
+                log("QA passed with polish suggestions; continuing without throwing away the topic.")
             return plan, last_qa
-        feedback = "; ".join(str(x) for x in (last_qa.get("issues") or []))[:1200]
-    raise RuntimeError(f"Plan failed QA after 3 attempts: {last_qa}")
+        fatal = last_qa.get("fatal_issues") or []
+        polish = last_qa.get("polish_issues") or []
+        feedback_items = list(fatal) + list(polish[:4])
+        feedback = "; ".join(str(x) for x in feedback_items)[:1400]
+
+    if best_plan is not None and best_qa is not None:
+        fatal = best_qa.get("fatal_issues") or []
+        if (not fatal and float(best_qa.get("topic_relevance", 0)) >= 8
+                and float(best_qa.get("factual_grounding", 0)) >= 8
+                and float(best_qa.get("visual_coherence", 0)) >= 6):
+            log("QA never became perfect, but the best plan has no fatal accuracy issues; accepting it instead of failing the run.")
+            best_qa["pass"] = True
+            best_qa["publishable"] = True
+            best_qa["accepted_best_effort"] = True
+            return best_plan, best_qa
+    raise RuntimeError(f"Plan failed factual QA after 3 attempts: {best_qa}")
 
 
-async def make_tts(script: str, mp3: Path, srt: Path) -> None:
+def voice_rate_for_word_count(word_count: int) -> str:
+    configured = str(CFG.get("voice_rate", "-3%"))
+    # Natural TTS slowdown is preferable to heavy post-stretch for short but otherwise good plans.
+    if word_count < 140:
+        return "-15%"
+    if word_count < 155:
+        return "-10%"
+    if word_count < 170:
+        return "-6%"
+    return configured
+
+
+async def make_tts(script: str, mp3: Path, srt: Path, rate_override: str | None = None) -> None:
     communicate = edge_tts.Communicate(
         script,
         CFG.get("voice", "en-US-AvaMultilingualNeural"),
-        rate=CFG.get("voice_rate", "-3%"),
+        rate=rate_override or CFG.get("voice_rate", "-3%"),
         pitch=CFG.get("voice_pitch", "+0Hz"),
     )
     submaker = edge_tts.SubMaker()
@@ -627,9 +744,14 @@ def ensure_min_duration(mp3: Path, srt: Path, minimum: float = 61.5) -> float:
     d = ffprobe_duration(mp3)
     if d >= minimum:
         return d
-    # Slightly slow the narration if Mistral produced unusually brisk text.
-    factor = min(1.18, minimum / max(d, 1.0))
+    # The script-length gate already prevents extremely short narration. Stretch only as much
+    # as needed, with a quality cap; this is safer than failing at 59-61 seconds because TTS
+    # happened to speak faster than expected.
+    factor = minimum / max(d, 1.0)
+    if factor > 1.42:
+        raise RuntimeError(f"Narration audio is too short to stretch naturally: {d:.2f}s")
     tempo = 1.0 / factor
+    log(f"Narration is {d:.2f}s; gently stretching audio by {factor:.3f}x to clear {minimum:.1f}s.")
     stretched = mp3.with_name("voice_stretched.mp3")
     run(["ffmpeg", "-y", "-i", str(mp3), "-filter:a", f"atempo={tempo:.5f}", "-b:a", "192k", str(stretched)])
     stretched.replace(mp3)
@@ -641,31 +763,41 @@ def pexels_search(query: str, per_page: int = 12) -> List[Dict[str, Any]]:
     key = os.getenv("PEXELS_API_KEY", "").strip()
     if not key:
         raise RuntimeError("PEXELS_API_KEY is missing. Add it to GitHub Actions secrets.")
-    r = requests.get(
-        "https://api.pexels.com/videos/search",
-        headers={"Authorization": key},
-        params={"query": query, "per_page": min(40, per_page), "orientation": "portrait", "size": "medium"},
-        timeout=40,
-    )
-    r.raise_for_status()
-    out = []
-    for v in r.json().get("videos", []):
-        files = [f for f in v.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("link")]
-        if not files:
-            continue
-        # Prefer vertical files close to 1080x1920 but tolerate any crop-able source.
-        files.sort(key=lambda x: abs((x.get("width") or 720) - 1080) + abs((x.get("height") or 1280) - 1920))
-        out.append({
-            "id": v.get("id"),
-            "url": v.get("url"),
-            "duration": v.get("duration"),
-            "creator": (v.get("user") or {}).get("name"),
-            "download": files[0]["link"],
-            "width": files[0].get("width"),
-            "height": files[0].get("height"),
-        })
-    return out
-
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers={"Authorization": key},
+                params={"query": query, "per_page": min(40, per_page), "orientation": "portrait", "size": "medium"},
+                timeout=40,
+            )
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                retry_after = r.headers.get("Retry-After")
+                wait = min(15, int(retry_after)) if retry_after and retry_after.isdigit() else min(2 ** attempt, 8)
+                if attempt < 3:
+                    log(f"Pexels temporary error {r.status_code}; retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+            r.raise_for_status()
+            out = []
+            for v in r.json().get("videos", []):
+                files = [f for f in v.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("link")]
+                if not files:
+                    continue
+                files.sort(key=lambda x: abs((x.get("width") or 720) - 1080) + abs((x.get("height") or 1280) - 1920))
+                out.append({
+                    "id": v.get("id"), "url": v.get("url"), "duration": v.get("duration"),
+                    "creator": (v.get("user") or {}).get("name"), "download": files[0]["link"],
+                    "width": files[0].get("width"), "height": files[0].get("height"),
+                })
+            return out
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < 3:
+                time.sleep(min(2 ** attempt, 8))
+                continue
+    raise RuntimeError(f"Pexels search failed after retries: {last_error}")
 
 def select_pexels_for_scene(scene: Dict[str, Any], used_ids: set) -> Dict[str, Any] | None:
     queries = [clean_text(str(q)) for q in (scene.get("pexels_queries") or []) if clean_text(str(q))]
@@ -800,7 +932,8 @@ def main() -> None:
 
     forced_topic = bool(os.getenv("TOPIC", "").strip())
     prep_error: Exception | None = None
-    for prep_attempt in range(1, 4):
+    prep_attempts = int(CFG.get("preproduction_attempts", 5))
+    for prep_attempt in range(1, prep_attempts + 1):
         topic = choose_topic()
         log(f"Selected topic (attempt {prep_attempt}): {topic['title']}")
         try:
@@ -811,7 +944,7 @@ def main() -> None:
         except Exception as e:
             prep_error = e
             log(f"Pre-production rejected topic/source/plan: {e}")
-            if forced_topic or prep_attempt == 3:
+            if forced_topic or prep_attempt == prep_attempts:
                 raise
     else:
         raise RuntimeError(f"Pre-production failed: {prep_error}")
@@ -821,7 +954,9 @@ def main() -> None:
 
     voice = WORK / "voice.mp3"
     srt = WORK / "captions.srt"
-    asyncio.run(make_tts(script, voice, srt))
+    effective_voice_rate = voice_rate_for_word_count(words(script))
+    log(f"TTS voice rate: {effective_voice_rate}")
+    asyncio.run(make_tts(script, voice, srt, rate_override=effective_voice_rate))
     total = ensure_min_duration(voice, srt, minimum=float(CFG.get("minimum_seconds", 61.5)))
     compact_captions(srt, max_words=int(CFG.get("caption_max_words", 6)), max_chars=int(CFG.get("caption_max_chars", 34)))
     ass = WORK / "captions.ass"
@@ -876,12 +1011,15 @@ def main() -> None:
         "slug": slug,
         "source_title": source_title,
         "source_url": source_url,
+        "wikipedia_disabled_after_429": WIKIPEDIA_DISABLED_THIS_RUN,
         "narration_words": words(script),
         "duration_seconds": round(ffprobe_duration(final), 3),
         "voice": CFG.get("voice"),
+        "voice_rate": effective_voice_rate,
         "mistral_model": os.getenv("MISTRAL_MODEL", CFG.get("mistral_model")),
         "plan_qa": plan_qa,
         "pexels_sources": pexels_sources,
+        "generator_version": "2.4",
         "generated_unix": int(time.time()),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     shutil.copy2(srt, OUT / "captions.srt")

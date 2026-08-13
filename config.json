@@ -1,6 +1,6 @@
 {
   "language": "en",
-  "niche": "technology, science and surprising true history",
+  "niche": "technology, science, engineering and everyday phenomena",
   "mistral_model": "mistral-small-latest",
   "voice": "en-US-AvaMultilingualNeural",
   "voice_rate": "-3%",
@@ -16,5 +16,10 @@
   "caption_max_chars": 34,
   "caption_font_size": 46,
   "caption_margin_v": 300,
-  "caption_margin_lr": 105
+  "caption_margin_lr": 105,
+  "narration_target_min": 175,
+  "narration_target_max": 225,
+  "narration_hard_min": 130,
+  "narration_hard_max": 250,
+  "preproduction_attempts": 5
 }

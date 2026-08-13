@@ -1,90 +1,80 @@
-# TikTok Auto Video v2 — Mistral + Pexels
+# TikTok Auto Video v2.4 — Mistral + Pexels
 
-Генератор англоязычных вертикальных роликов 1080×1920 для TikTok. Версия v2 собрана после разбора первого реального прогона и исправляет две главные проблемы: уход сценария в нерелевантную Wikipedia-страницу и слишком крупные/обрезанные субтитры.
+Генератор англоязычных вертикальных роликов 1080×1920 для TikTok. Эта версия собрана после нескольких реальных GitHub Actions прогонов и специально исправляет проблемы, которые проявились в логах: Wikipedia 429, слишком строгий QA, нестабильную длину сценария и переполнение субтитров.
 
-## Что изменено в v2
+## Что делает генератор
 
-1. **Жёсткий выбор источника.** Генератор получает несколько кандидатов Wikipedia, автоматически исключает disambiguation/list-страницы и отправляет кандидата на отдельную проверку Mistral. Статья принимается только при высокой релевантности исходной теме.
-2. **Запрет topic drift.** Сценарий теперь строится именно по выбранной теме, а не просто по заголовку найденной статьи. В промпте запрещены однофамильцы, случайные связанные факты и расширение темы ради наполнения хронометража.
-3. **Отдельный QA сценария.** После генерации второй проход Mistral оценивает релевантность теме, фактологическую опору, силу hook и соответствие визуалов. Неудачный план автоматически переделывается до 3 раз.
-4. **Более частая смена кадров.** Цель — 14–18 сцен на ролик вместо длинных кусков одного stock-видео.
-5. **Более безопасные Pexels-запросы.** Mistral просит конкретные визуальные объекты и атмосферные кадры, а не современный объект, который должен якобы изображать исторический оригинал. Из результатов Pexels теперь выбирается наиболее релевантный верхний свежий результат, а не случайный из первых шести.
-6. **Убрано зеркалирование Pexels-видео.** Оно могло переворачивать надписи, инструменты и естественные действия людей.
-7. **Полностью переделаны субтитры.** Длинные предложения автоматически режутся на короткие фразы, обычно до 6 слов / 34 символов. Затем создаётся ASS с реальным холстом 1080×1920, фиксированным размером шрифта и безопасными полями. Не должно быть строк, выходящих за экран.
-8. **Автоповтор при плохой теме.** Если режим автоматический и тема/источник/план не проходит контроль, бот пробует новую тему до 3 раз. При ручной теме ошибка не маскируется — workflow остановится и покажет причину.
-9. **Self-test в GitHub Actions.** До обращения к API проверяется Python-код и логика компактных субтитров.
-
-## Полный конвейер
-
-`Mistral topic → Wikipedia candidates → Mistral source validation → Mistral script/scenes → Mistral QA → edge-tts → compact captions → Pexels per scene → FFmpeg → video.mp4`
+`Mistral topic → Wikipedia (best effort) / Mistral fact brief → Mistral script + scenes → factual QA → edge-tts → compact captions → Pexels per scene → FFmpeg → video.mp4`
 
 На выходе в `output/`:
 
-- `video.mp4` — готовый ролик;
-- `caption.txt` — подпись;
-- `script.txt` — текст озвучки;
-- `captions.srt` — уже укороченные субтитры;
-- `captions.ass` — финальная разметка субтитров 1080×1920;
-- `plan.json` — сцены и Pexels-запросы;
-- `metadata.json` — источник, QA-оценки и реально использованные Pexels-клипы.
+- `video.mp4` — готовый вертикальный ролик;
+- `caption.txt` — подпись TikTok;
+- `script.txt` — полный текст озвучки;
+- `captions.srt` — короткие субтитры;
+- `captions.ass` — финальный стиль субтитров 1080×1920;
+- `plan.json` — сцены и поисковые запросы Pexels;
+- `metadata.json` — тема, источник, QA, длительность, voice rate и использованные Pexels-клипы.
 
-## Секреты GitHub
+## Главное в v2.4
 
-`Settings → Secrets and variables → Actions → Secrets`
+1. **Wikipedia 429 больше не ломает запуск.** После первого `429` Wikipedia отключается до конца текущего workflow. Все следующие темы сразу используют Mistral fact brief и не повторяют запросы с того же GitHub Runner IP.
+2. **Длина сценария больше не является хрупким hard fail.** Цель — 175–225 слов. Если Mistral промахнулся, выполняются до 3 repair-pass. Генератор хранит лучший вариант и допускает безопасный диапазон, вместо того чтобы выбрасывать нормальную тему из‑за 3–10 слов.
+3. **Короткий хороший сценарий не убивает workflow.** Для коротких текстов автоматически выбирается более медленная естественная скорость edge-tts, а затем при необходимости применяется небольшой `atempo` stretch до минимальной длительности.
+4. **QA разделён на fatal и polish.** Unsupported facts, реальный topic drift и обманный визуал — fatal. Слабый hook, повтор, метафора или неидеальный stock — polish. Polish заставляет бота попробовать улучшить сценарий, но не валит весь запуск навсегда.
+5. **До 5 попыток pre-production.** Если тема действительно не проходит фактологию, бот выбирает другую. Это не связано с небольшим промахом по word count.
+6. **Автотемы теперь stock-friendly.** По умолчанию бот предпочитает science / technology / engineering / everyday phenomena и избегает тем, которые требуют точной исторической кинохроники или провоцируют «mystery/conspiracy» формулировки.
+7. **Mistral и Pexels имеют retry на временные 429/5xx.** Кратковременный API сбой не должен сразу останавливать workflow.
+8. **Субтитры остаются компактными.** Обычно до 6 слов / 34 символов, максимум две короткие строки, шрифт 46, безопасные боковые и нижние поля.
+9. **Self-test расширен.** Он проверяет compact captions, word-count repair, отключение Wikipedia после первого 429, QA-классификацию и динамический TTS rate.
 
-Нужны:
+## GitHub Secrets
+
+`Settings → Secrets and variables → Actions`
+
+Нужны два секрета:
 
 - `MISTRAL_API_KEY`
 - `PEXELS_API_KEY`
 
-Опциональная variable:
+Опциональная repository variable:
 
 - `MISTRAL_MODEL` — по умолчанию `mistral-small-latest`.
 
-Ключи в файлы проекта вставлять не нужно.
+Ключи в файлы проекта не вставляются.
 
 ## Запуск
 
 `Actions → Generate TikTok Video → Run workflow`
 
-`topic` можно оставить пустым. Тогда бот сам ищет новую тему. Для теста можно указать точную тему, например:
+`topic` можно оставить пустым. Тогда Mistral сам выберет stock-friendly тему. `niche` тоже можно переопределить вручную.
 
-`How the Wright Brothers built the first practical airplane`
+Workflow также имеет ежедневный cron. При необходимости его можно изменить или удалить в `.github/workflows/generate-video.yml`.
 
-Если источник Wikipedia не соответствует этой теме, генерация теперь остановится вместо того, чтобы выпускать ролик про однофамильцев.
-
-## Настройка субтитров
+## Настройки субтитров
 
 В `config.json`:
 
-- `caption_max_words`: 6
-- `caption_max_chars`: 34
-- `caption_font_size`: 46
-- `caption_margin_lr`: 105
-- `caption_margin_v`: 300
+- `caption_max_words`: `6`
+- `caption_max_chars`: `34`
+- `caption_font_size`: `46`
+- `caption_margin_lr`: `105`
+- `caption_margin_v`: `300`
 
-Текущие значения рассчитаны под 1080×1920. Субтитр располагается выше нижнего интерфейса TikTok и имеет большие безопасные поля слева/справа.
+Эти значения рассчитаны под холст 1080×1920 и оставляют место под интерфейс TikTok.
 
-## Автозапуск
+## Настройки сценария
 
-Workflow по-прежнему запускается один раз в сутки по cron. Время можно изменить в `.github/workflows/generate-video.yml`.
+По умолчанию:
 
-## Перед публикацией
+- target: `175–225` слов;
+- hard safe band: `130–250` слов;
+- сцены: обычно `14–18`;
+- pre-production attempts: `5`;
+- минимальная длительность готовой озвучки: `61.5` сек.
 
-Автоматический QA сильно снижает вероятность плохого ролика, но Pexels остаётся stock-библиотекой и не может гарантировать исторически точный кадр для каждой фразы. Перед публикацией всё равно стоит быстро просмотреть `video.mp4`. Если конкретный Pexels-клип выглядит неуместно, его `query`, `pexels_id` и URL записаны в `metadata.json`.
+Точный word count не важнее фактов. Финальная длительность всё равно проверяется после TTS.
 
-## v2.1: защита от Wikipedia 429
+## Важное ограничение
 
-GitHub-hosted runners используют общие IP-адреса, поэтому Wikimedia иногда отвечает `429 Too Many Requests`. В v2.1 генератор делает несколько коротких повторов запроса, а если Wikipedia всё равно недоступна — **не валит весь запуск**. Он переключается на консервативный fact brief от Mistral и продолжает обычные этапы QA, Pexels, TTS и рендера.
-
-В `metadata.json` поле `source_title` покажет, использовалась ли Wikipedia или `Mistral conservative fact brief`.
-
-## v2.2 reliability fix
-
-`config.json` and `topics.json` are now loaded defensively. If either file is missing, empty, contains a UTF-8 BOM, or has malformed JSON, the generator logs a warning and uses built-in defaults instead of crashing during import/self-test.
-
-## v2.3 reliability changes
-- Wikipedia HTTP 429 now triggers an immediate Mistral fact-brief fallback instead of wasting the run on retries that cannot succeed before `Retry-After` expires.
-- Script length misses are repaired automatically. A 156-word or 271-word draft is no longer treated as a bad topic by itself.
-- The repair pass targets 185-215 words, preserves supported facts, removes filler when shortening, and expands only from facts already present in the source brief.
-- QA now receives the actual per-scene Pexels queries and no longer treats internal source labels such as `Mistral conservative fact brief` as content the narration is supposed to mention.
+Pexels — stock-библиотека. Генератор старается делать запросы буквальными и не выдавать современный generic-клип за точную историческую запись, но перед публикацией всё равно стоит быстро просмотреть `video.mp4`. Ссылки на использованные Pexels-клипы сохраняются в `metadata.json`.
