@@ -68,26 +68,89 @@ def require_binary(name: str) -> None:
         raise RuntimeError(f"Required binary not found: {name}")
 
 
-def wikipedia_search(query: str) -> Tuple[str, str, str]:
-    """Return title, extract, canonical URL."""
-    s = requests.get(
-        "https://en.wikipedia.org/w/api.php",
-        params={"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 1},
-        headers=UA, timeout=30,
-    )
-    s.raise_for_status()
-    hits = s.json().get("query", {}).get("search", [])
-    title = hits[0]["title"] if hits else query
-    r = requests.get(
-        "https://en.wikipedia.org/w/api.php",
-        params={"action": "query", "format": "json", "prop": "extracts|info", "explaintext": 1,
-                "redirects": 1, "inprop": "url", "titles": title},
-        headers=UA, timeout=30,
-    )
-    r.raise_for_status()
-    page = next(iter(r.json()["query"]["pages"].values()))
-    return page.get("title", title), clean_text(page.get("extract", "")), page.get("fullurl", "")
+def _topic_terms(text: str) -> List[str]:
+    stop = {"how","why","what","who","when","where","the","a","an","and","or","of","to","in","on","for","with","from","built","made","first"}
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in stop]
 
+
+def wikipedia_candidates(topic: Dict[str, str], limit: int = 8) -> List[Dict[str, str]]:
+    """Find several plausible Wikipedia pages and aggressively reject disambiguation/list pages."""
+    queries = []
+    for q in (topic.get("search", ""), topic.get("title", "")):
+        q = clean_text(q)
+        if q and q not in queries:
+            queries.append(q)
+    hits: Dict[str, Dict[str, str]] = {}
+    for query in queries:
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": limit},
+            headers=UA, timeout=30,
+        )
+        r.raise_for_status()
+        for h in r.json().get("query", {}).get("search", []):
+            title = h.get("title", "")
+            if title:
+                hits[title] = {"title": title}
+
+    terms = set(_topic_terms(" ".join([topic.get("title", ""), topic.get("search", "")])))
+    out: List[Dict[str, str]] = []
+    for title in list(hits)[: limit * 2]:
+        low = title.lower()
+        if "(disambiguation)" in low or low.startswith("list of ") or low.startswith("index of "):
+            continue
+        r = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "query", "format": "json", "prop": "extracts|info", "explaintext": 1,
+                    "redirects": 1, "inprop": "url", "titles": title},
+            headers=UA, timeout=30,
+        )
+        r.raise_for_status()
+        page = next(iter(r.json()["query"]["pages"].values()))
+        extract = clean_text(page.get("extract", ""))
+        final_title = page.get("title", title)
+        first = extract[:500].lower()
+        if len(extract) < 900:
+            continue
+        if "may refer to:" in first or "may refer to" in first or "can refer to:" in first:
+            continue
+        title_terms = set(_topic_terms(final_title))
+        score = 4 * len(terms & title_terms) + len(terms & set(_topic_terms(extract[:1800])))
+        out.append({"title": final_title, "extract": extract, "url": page.get("fullurl", ""), "score": str(score)})
+    out.sort(key=lambda x: int(x["score"]), reverse=True)
+    return out[:limit]
+
+
+def validate_source(topic: Dict[str, str], candidate: Dict[str, str]) -> Tuple[bool, str]:
+    data = mistral_json([
+        {"role": "system", "content": "You are a strict source-selection editor. Return JSON only."},
+        {"role": "user", "content": (
+            "Decide whether this Wikipedia article is directly about the requested short-video topic, not merely a name match, disambiguation, adjacent subject, or broad list. "
+            "A source should contain enough material to support a focused 65-90 second video. "
+            f"TOPIC: {topic.get('title','')}\nSEARCH INTENT: {topic.get('search','')}\n"
+            f"ARTICLE TITLE: {candidate['title']}\nARTICLE EXCERPT: {candidate['extract'][:5000]}\n"
+            "Return exactly {\"pass\":true/false,\"relevance\":0-10,\"reason\":\"short reason\"}."
+        )}
+    ], max_tokens=220, temperature=0.0)
+    ok = bool(data.get("pass")) and float(data.get("relevance", 0)) >= 8
+    return ok, clean_text(str(data.get("reason", "")))
+
+
+def wikipedia_search(topic: Dict[str, str]) -> Tuple[str, str, str]:
+    candidates = wikipedia_candidates(topic)
+    if not candidates:
+        raise RuntimeError(f"No suitable Wikipedia candidates for topic: {topic.get('title')}")
+    failures = []
+    for cand in candidates[:5]:
+        try:
+            ok, reason = validate_source(topic, cand)
+        except Exception as e:
+            ok, reason = False, f"validation error: {e}"
+        log(f"Source candidate: {cand['title']} | score={cand['score']} | accepted={ok} | {reason}")
+        if ok:
+            return cand["title"], cand["extract"], cand["url"]
+        failures.append(f"{cand['title']}: {reason}")
+    raise RuntimeError("No Wikipedia source passed topic validation. " + " | ".join(failures))
 
 def mistral_json(messages: List[Dict[str, str]], max_tokens: int = 1800, temperature: float = 0.55) -> Dict[str, Any]:
     key = os.getenv("MISTRAL_API_KEY", "").strip()
@@ -153,60 +216,98 @@ def choose_topic() -> Dict[str, str]:
     return topic
 
 
-def make_plan(topic: Dict[str, str], source_title: str, extract: str) -> Dict[str, Any]:
-    if len(extract) < 400:
+def make_plan(topic: Dict[str, str], source_title: str, extract: str, feedback: str = "") -> Dict[str, Any]:
+    if len(extract) < 700:
         raise RuntimeError(f"Wikipedia source is too short for: {source_title}")
     prompt = f"""
-Create an original factual English short-video plan about: {source_title}.
+Create an original factual English short-video plan about THIS EXACT TOPIC: {topic.get('title','')}.
+The source article is: {source_title}.
 The video is for a faceless educational TikTok aimed at US/UK viewers.
-Target narration: 190-220 words, approximately 65-90 seconds.
-Use ONLY facts supported by the SOURCE below. Never invent names, dates, numbers, quotes, motives, or causal claims.
-Opening must create curiosity in the first sentence without clickbait that the source cannot support.
-Use conversational American English, short sentences, no headings in narration, no 'follow for more', no hashtags in narration.
+Target narration: 185-215 words, approximately 65-85 seconds.
+Use ONLY facts supported by the SOURCE below. Never invent names, dates, numbers, quotes, motives, causal claims, or extra people merely because they share a name.
+DO NOT broaden the topic into unrelated people, places, namesakes, disambiguation entries, or trivia that is not central to the requested topic.
+Opening must create strong curiosity in the first 1-2 seconds while remaining factual.
+Use conversational American English, short sentences, and a clear narrative arc: hook -> setup -> escalation/explanation -> payoff.
+No headings in narration, no 'follow for more', no hashtags in narration.
 
 Return JSON with this exact shape:
 {{
-  "title": "short video title",
+  "title": "short video title directly about the requested topic",
   "hook": "first narration sentence",
-  "caption": "TikTok caption, max 170 chars, no more than 4 hashtags",
+  "caption": "TikTok caption, max 150 chars, no more than 4 hashtags",
   "scenes": [
-    {{"narration": "1-3 sentences", "pexels_queries": ["specific visual search", "fallback visual search"]}}
+    {{"narration": "1-2 short sentences", "pexels_queries": ["specific stock visual search", "specific fallback search", "generic but relevant fallback"]}}
   ]
 }}
 
 Requirements:
-- 12 to 16 scenes.
-- Every scene must have narration.
-- Each pexels query must describe VISUALS, not abstract concepts, and must be 2-6 English words.
-- Prefer objects, places, machines, laboratories, hands, architecture, maps, nature, archival-like generic visuals.
-- Avoid exact brands/logos, copyrighted film footage, celebrities, and graphic content.
-- Total narration must be 190-220 words.
+- 14 to 18 scenes so visuals change frequently.
+- Every scene must advance the SAME topic.
+- Each pexels query must describe concrete visible things, 2-6 English words.
+- Prefer visually literal stock footage: objects, machines, workshops, landscapes, maps, hands, tools, laboratories, architecture.
+- When an exact historic object is unlikely on Pexels, request a truthful generic visual (for example 'vintage bicycle workshop'), not a misleading modern substitute pretending to be the historic object.
+- Do not request portraits of named historical people unless generic portraits are only atmospheric and narration does not imply identity.
+- Avoid logos, movie footage, celebrities, graphic content, modern visuals that falsely represent a historical event, and text-heavy footage.
+- Total narration must be 185-215 words.
+- Never use the word 'disambiguation' in title, caption, or narration.
 - Return valid JSON only.
 
+Previous QA feedback, if any: {feedback or 'none'}
+
 SOURCE ({source_title}):
-{extract[:12000]}
+{extract[:14000]}
 """
     data = mistral_json([
         {"role": "system", "content": "You are a meticulous short-form documentary script editor. Return valid JSON only."},
         {"role": "user", "content": prompt},
-    ], max_tokens=2500, temperature=0.55)
+    ], max_tokens=2800, temperature=0.42)
 
     scenes = data.get("scenes") or []
-    if not 10 <= len(scenes) <= 18:
+    if not 12 <= len(scenes) <= 20:
         raise RuntimeError(f"Mistral returned invalid scene count: {len(scenes)}")
     narrations = [clean_text(str(s.get("narration", ""))) for s in scenes]
     total = words(" ".join(narrations))
-    if not 165 <= total <= 245:
+    if not 170 <= total <= 230:
         raise RuntimeError(f"Mistral narration word count out of bounds: {total}")
     for s in scenes:
-        qs = s.get("pexels_queries") or []
-        if not qs:
-            s["pexels_queries"] = [source_title]
+        qs = [clean_text(str(q)) for q in (s.get("pexels_queries") or []) if clean_text(str(q))]
+        s["pexels_queries"] = qs[:3] or [topic.get("search") or source_title]
         s["narration"] = clean_text(str(s["narration"]))
-    data["title"] = clean_text(str(data.get("title", source_title)))
+    data["title"] = clean_text(str(data.get("title", topic.get("title") or source_title)))
     data["hook"] = clean_text(str(data.get("hook", narrations[0])))
-    data["caption"] = clean_text(str(data.get("caption", data["title"])))[:220]
+    data["caption"] = clean_text(str(data.get("caption", data["title"])))[:180]
+    if "disambiguation" in (data["title"] + " " + data["caption"]).lower():
+        raise RuntimeError("Plan drifted into disambiguation content")
     return data
+
+
+def qa_plan(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    script = clean_text(" ".join(s.get("narration", "") for s in plan.get("scenes", [])))
+    data = mistral_json([
+        {"role": "system", "content": "You are an adversarial fact-checking and retention editor. Return JSON only."},
+        {"role": "user", "content": (
+            "Audit this TikTok plan against the exact requested topic and source. Fail it for topic drift, unsupported facts, misleading visual framing, weak first sentence, unrelated namesakes, or repetitive filler. "
+            f"REQUESTED TOPIC: {topic.get('title','')}\nSOURCE TITLE: {source_title}\nSOURCE: {extract[:9000]}\n"
+            f"PLAN TITLE: {plan.get('title','')}\nHOOK: {plan.get('hook','')}\nSCRIPT: {script}\n"
+            "Return JSON exactly like {\"pass\":true/false,\"topic_relevance\":0-10,\"factual_grounding\":0-10,\"hook_strength\":0-10,\"visual_coherence\":0-10,\"issues\":[\"...\"]}."
+        )}
+    ], max_tokens=500, temperature=0.0)
+    scores = [float(data.get(k, 0)) for k in ("topic_relevance", "factual_grounding", "hook_strength", "visual_coherence")]
+    data["pass"] = bool(data.get("pass")) and scores[0] >= 8 and scores[1] >= 8 and scores[2] >= 7 and scores[3] >= 7
+    return data
+
+
+def build_validated_plan(topic: Dict[str, str], source_title: str, extract: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    feedback = ""
+    last_qa: Dict[str, Any] = {}
+    for attempt in range(1, 4):
+        plan = make_plan(topic, source_title, extract, feedback=feedback)
+        last_qa = qa_plan(topic, source_title, extract, plan)
+        log(f"Plan QA attempt {attempt}: {json.dumps(last_qa, ensure_ascii=False)}")
+        if last_qa.get("pass"):
+            return plan, last_qa
+        feedback = "; ".join(str(x) for x in (last_qa.get("issues") or []))[:1200]
+    raise RuntimeError(f"Plan failed QA after 3 attempts: {last_qa}")
 
 
 async def make_tts(script: str, mp3: Path, srt: Path) -> None:
@@ -249,6 +350,107 @@ def retime_srt(path: Path, factor: float) -> None:
     txt = pat.sub(lambda m: f"{fmt_srt_time(parse_srt_time(m.group(1))*factor)} --> {fmt_srt_time(parse_srt_time(m.group(2))*factor)}", txt)
     path.write_text(txt, encoding="utf-8")
 
+
+
+def parse_srt_entries(path: Path) -> List[Tuple[float, float, str]]:
+    txt = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    entries: List[Tuple[float, float, str]] = []
+    for block in re.split(r"\n\s*\n", txt.strip()):
+        lines = [x.strip() for x in block.splitlines() if x.strip()]
+        if len(lines) < 3 or " --> " not in lines[1]:
+            continue
+        a, b = lines[1].split(" --> ", 1)
+        entries.append((parse_srt_time(a), parse_srt_time(b), clean_text(" ".join(lines[2:]))))
+    return entries
+
+
+def compact_captions(path: Path, max_words: int = 6, max_chars: int = 34) -> None:
+    """Split long TTS sentence cues into TikTok-friendly bites that never overflow the frame."""
+    entries = parse_srt_entries(path)
+    out: List[Tuple[float, float, str]] = []
+    for start, end, text in entries:
+        toks = text.split()
+        chunks: List[List[str]] = []
+        cur: List[str] = []
+        for tok in toks:
+            candidate = " ".join(cur + [tok])
+            if cur and (len(cur) >= max_words or len(candidate) > max_chars):
+                chunks.append(cur)
+                cur = [tok]
+            else:
+                cur.append(tok)
+        if cur:
+            chunks.append(cur)
+        if len(chunks) >= 2 and len(chunks[-1]) <= 2:
+            merged = chunks[-2] + chunks[-1]
+            if len(merged) <= max_words + 2 and len(" ".join(merged)) <= max_chars + 12:
+                chunks[-2:] = [merged]
+        if not chunks:
+            continue
+        weights = [max(1, sum(len(w.strip(".,!?;:'\"—-")) for w in c)) for c in chunks]
+        total_w = sum(weights)
+        duration = max(0.01, end - start)
+        cursor = start
+        elapsed_weight = 0
+        for i, (chunk, weight) in enumerate(zip(chunks, weights)):
+            elapsed_weight += weight
+            stop = end if i == len(chunks) - 1 else start + duration * elapsed_weight / total_w
+            out.append((cursor, stop, " ".join(chunk)))
+            cursor = stop
+
+    lines: List[str] = []
+    for i, (a, b, text) in enumerate(out, 1):
+        lines.extend([str(i), f"{fmt_srt_time(a)} --> {fmt_srt_time(b)}", text, ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def ass_time(sec: float) -> str:
+    sec = max(0.0, sec)
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = sec % 60
+    return f"{h}:{m:02d}:{s:05.2f}"
+
+
+def ass_escape(text: str) -> str:
+    return text.replace("{", "\\{").replace("}", "\\}")
+
+
+def wrap_caption(text: str, width: int = 22) -> str:
+    parts = textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False)
+    if len(parts) <= 2:
+        return r"\N".join(parts)
+    # compact_captions should make this rare; keep only two balanced lines rather than overflowing.
+    words_ = text.split()
+    mid = max(1, len(words_) // 2)
+    return " ".join(words_[:mid]) + r"\N" + " ".join(words_[mid:])
+
+
+def make_ass_from_srt(srt: Path, ass: Path) -> None:
+    entries = parse_srt_entries(srt)
+    font_size = int(CFG.get("caption_font_size", 46))
+    margin_v = int(CFG.get("caption_margin_v", 300))
+    margin_lr = int(CFG.get("caption_margin_lr", 105))
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: TikTok,DejaVu Sans,{font_size},&H00FFFFFF,&H00FFFFFF,&H00101010,&H60000000,-1,0,0,0,100,100,0,0,1,4,1,2,{margin_lr},{margin_lr},{margin_v},1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+"""
+    lines = [header.rstrip()]
+    for start, end, text in entries:
+        wrapped = wrap_caption(text, width=22)
+        lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},TikTok,,0,0,0,,{ass_escape(wrapped)}")
+    ass.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 def ensure_min_duration(mp3: Path, srt: Path, minimum: float = 61.5) -> float:
     d = ffprobe_duration(mp3)
@@ -301,7 +503,7 @@ def select_pexels_for_scene(scene: Dict[str, Any], used_ids: set) -> Dict[str, A
             candidates = pexels_search(query, per_page=15)
             fresh = [c for c in candidates if c.get("id") not in used_ids]
             if fresh:
-                choice = random.choice(fresh[:6])
+                choice = fresh[0]
                 choice["query"] = query
                 used_ids.add(choice.get("id"))
                 return choice
@@ -321,11 +523,8 @@ def download(url: str, path: Path) -> None:
 
 def normalize_clip(src: Path, dst: Path, seconds: float, idx: int) -> None:
     w, h, fps = CFG["width"], CFG["height"], CFG["fps"]
-    # Alternate subtle motion/crop so stock footage feels less repetitive.
-    if idx % 2 == 0:
-        vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={fps},eq=contrast=1.05:saturation=0.94:brightness=-0.01"
-    else:
-        vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},hflip,fps={fps},eq=contrast=1.04:saturation=0.96:brightness=-0.015"
+    # Preserve footage direction; horizontal flipping can make text, tools and human actions look wrong.
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={fps},eq=contrast=1.03:saturation=0.97:brightness=-0.008"
     run([
         "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src), "-t", f"{seconds:.3f}", "-an", "-vf", vf,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(CFG.get("crf", 21)), "-pix_fmt", "yuv420p", str(dst)
@@ -382,14 +581,9 @@ def ass_style_path(srt: Path) -> str:
     return str(srt).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def render_final(base_video: Path, voice: Path, srt: Path, out: Path) -> None:
-    sub = ass_style_path(srt)
-    # Large centered captions with outline, placed above TikTok's lower UI.
-    vf = (
-        f"subtitles='{sub}':force_style='FontName=DejaVu Sans,FontSize=18,Bold=1,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=3,Shadow=1,"
-        "Alignment=2,MarginV=245'"
-    )
+def render_final(base_video: Path, voice: Path, ass: Path, out: Path) -> None:
+    sub = str(ass).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    vf = f"ass='{sub}'"
     run([
         "ffmpeg", "-y", "-i", str(base_video), "-i", str(voice),
         "-map", "0:v:0", "-map", "1:a:0", "-vf", vf,
@@ -433,11 +627,24 @@ def main() -> None:
     WORK.mkdir(exist_ok=True)
     OUT.mkdir(exist_ok=True)
 
-    topic = choose_topic()
-    log(f"Selected topic: {topic['title']}")
-    source_title, extract, source_url = wikipedia_search(topic.get("search") or topic["title"])
-    log(f"Wikipedia source: {source_title}")
-    plan = make_plan(topic, source_title, extract)
+    forced_topic = bool(os.getenv("TOPIC", "").strip())
+    prep_error: Exception | None = None
+    for prep_attempt in range(1, 4):
+        topic = choose_topic()
+        log(f"Selected topic (attempt {prep_attempt}): {topic['title']}")
+        try:
+            source_title, extract, source_url = wikipedia_search(topic)
+            log(f"Wikipedia source: {source_title}")
+            plan, plan_qa = build_validated_plan(topic, source_title, extract)
+            break
+        except Exception as e:
+            prep_error = e
+            log(f"Pre-production rejected topic/source/plan: {e}")
+            if forced_topic or prep_attempt == 3:
+                raise
+    else:
+        raise RuntimeError(f"Pre-production failed: {prep_error}")
+
     script = clean_text(" ".join(s["narration"] for s in plan["scenes"]))
     log(f"Narration word count: {words(script)}")
 
@@ -445,6 +652,9 @@ def main() -> None:
     srt = WORK / "captions.srt"
     asyncio.run(make_tts(script, voice, srt))
     total = ensure_min_duration(voice, srt, minimum=float(CFG.get("minimum_seconds", 61.5)))
+    compact_captions(srt, max_words=int(CFG.get("caption_max_words", 6)), max_chars=int(CFG.get("caption_max_chars", 34)))
+    ass = WORK / "captions.ass"
+    make_ass_from_srt(srt, ass)
     log(f"Narration duration: {total:.2f}s")
 
     durations = build_scene_durations(plan["scenes"], total + 0.25)
@@ -483,7 +693,7 @@ def main() -> None:
 
     slug = safe_name(plan["title"])
     final = OUT / "video.mp4"
-    render_final(base_video, voice, srt, final)
+    render_final(base_video, voice, ass, final)
     validate_output(final, voice)
 
     (OUT / "script.txt").write_text(script + "\n", encoding="utf-8")
@@ -499,10 +709,12 @@ def main() -> None:
         "duration_seconds": round(ffprobe_duration(final), 3),
         "voice": CFG.get("voice"),
         "mistral_model": os.getenv("MISTRAL_MODEL", CFG.get("mistral_model")),
+        "plan_qa": plan_qa,
         "pexels_sources": pexels_sources,
         "generated_unix": int(time.time()),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     shutil.copy2(srt, OUT / "captions.srt")
+    shutil.copy2(ass, OUT / "captions.ass")
 
     log(f"DONE: {final}")
     log(f"Duration: {ffprobe_duration(final):.2f}s | size: {final.stat().st_size/1024/1024:.1f} MB")

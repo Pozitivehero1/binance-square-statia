@@ -11,5 +11,10 @@
   "fps": 30,
   "crf": 21,
   "final_crf": 19,
-  "output_dir": "output"
+  "output_dir": "output",
+  "caption_max_words": 6,
+  "caption_max_chars": 34,
+  "caption_font_size": 46,
+  "caption_margin_v": 300,
+  "caption_margin_lr": 105
 }

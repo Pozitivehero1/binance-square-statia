@@ -29,7 +29,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       STRICT_APIS: "1"
-      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL || 'mistral-small-latest' }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       TOPIC: ${{ inputs.topic || '' }}
@@ -52,6 +52,11 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      - name: Validate generator
+        run: |
+          python -m py_compile generate_video.py self_test.py
+          python self_test.py
 
       - name: Generate video
         run: python generate_video.py
