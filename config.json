@@ -1,20 +1,6 @@
-{
-  "language": "en",
-  "niche": "technology, science and surprising true history",
-  "mistral_model": "mistral-small-latest",
-  "voice": "en-US-AvaMultilingualNeural",
-  "voice_rate": "-3%",
-  "voice_pitch": "+0Hz",
-  "minimum_seconds": 61.5,
-  "width": 1080,
-  "height": 1920,
-  "fps": 30,
-  "crf": 21,
-  "final_crf": 19,
-  "output_dir": "output",
-  "caption_max_words": 6,
-  "caption_max_chars": 34,
-  "caption_font_size": 46,
-  "caption_margin_v": 300,
-  "caption_margin_lr": 105
-}
+MISTRAL_API_KEY=your_mistral_key
+MISTRAL_MODEL=mistral-small-latest
+PEXELS_API_KEY=your_pexels_key
+TOPIC=
+NICHE=technology, science and surprising true history
+STRICT_APIS=1

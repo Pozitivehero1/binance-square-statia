@@ -27,7 +27,16 @@ WORK = ROOT / ".work"
 OUT.mkdir(exist_ok=True)
 WORK.mkdir(exist_ok=True)
 
-UA = {"User-Agent": "TikTokAutoVideo/2.0 educational-video-generator"}
+UA = {
+    "User-Agent": os.getenv(
+        "WIKIMEDIA_USER_AGENT",
+        "TikTokAutoVideo/2.1 (educational-video-generator; contact: github-actions)"
+    ),
+    "Api-User-Agent": os.getenv(
+        "WIKIMEDIA_USER_AGENT",
+        "TikTokAutoVideo/2.1 (educational-video-generator; contact: github-actions)"
+    ),
+}
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
@@ -73,6 +82,61 @@ def _topic_terms(text: str) -> List[str]:
     return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in stop]
 
 
+def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
+    """Best-effort Wikimedia request. GitHub-hosted runners share IPs and can receive HTTP 429."""
+    delays = [0, 2, 6]
+    last_error: Exception | None = None
+    for attempt, delay in enumerate(delays, 1):
+        if delay:
+            time.sleep(delay)
+        try:
+            r = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params=params, headers=UA, timeout=timeout,
+            )
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After", "")
+                log(f"Wikipedia rate-limited (429), attempt {attempt}/{len(delays)}" + (f"; Retry-After={retry_after}" if retry_after else ""))
+                last_error = requests.HTTPError(f"429 Too Many Requests from Wikipedia")
+                continue
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError) as e:
+            last_error = e
+            if attempt < len(delays):
+                log(f"Wikipedia request failed, retrying: {e}")
+                continue
+    raise RuntimeError(f"Wikipedia unavailable after retries: {last_error}")
+
+
+def mistral_source_brief(topic: Dict[str, str]) -> Tuple[str, str, str]:
+    """Fallback when Wikimedia is rate-limited. Produces a conservative fact brief for evergreen topics."""
+    log("Wikipedia unavailable; switching to Mistral fact-brief fallback.")
+    data = mistral_json([
+        {"role": "system", "content": (
+            "You are a conservative research editor for evergreen educational videos. "
+            "Return JSON only. Do not guess. Omit any fact you are not highly confident about."
+        )},
+        {"role": "user", "content": (
+            f"Build a compact fact brief for this exact topic: {topic.get('title','')}.\n"
+            f"Search intent: {topic.get('search','')}.\n"
+            "Use only widely established, non-controversial facts suitable for a short explainer. "
+            "Avoid precise numbers, dates, named individuals, records, causal claims, or superlatives unless you are highly confident. "
+            "Do not broaden into namesakes or adjacent topics. "
+            "Return exactly {\"topic_match\":true/false,\"facts\":[\"atomic fact\",...],\"notes\":\"short caveat if needed\"}. "
+            "Provide 10-18 atomic facts. If you cannot support the exact topic confidently, set topic_match=false."
+        )}
+    ], max_tokens=1200, temperature=0.0)
+    facts = [clean_text(str(x)) for x in (data.get("facts") or []) if clean_text(str(x))]
+    if not data.get("topic_match") or len(facts) < 8:
+        raise RuntimeError("Mistral could not produce a sufficiently reliable fallback fact brief")
+    brief = " ".join(f"FACT {i}: {fact}" for i, fact in enumerate(facts, 1))
+    notes = clean_text(str(data.get("notes", "")))
+    if notes:
+        brief += " NOTES: " + notes
+    return "Mistral conservative fact brief", brief, ""
+
+
 def wikipedia_candidates(topic: Dict[str, str], limit: int = 8) -> List[Dict[str, str]]:
     """Find several plausible Wikipedia pages and aggressively reject disambiguation/list pages."""
     queries = []
@@ -82,13 +146,8 @@ def wikipedia_candidates(topic: Dict[str, str], limit: int = 8) -> List[Dict[str
             queries.append(q)
     hits: Dict[str, Dict[str, str]] = {}
     for query in queries:
-        r = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": limit},
-            headers=UA, timeout=30,
-        )
-        r.raise_for_status()
-        for h in r.json().get("query", {}).get("search", []):
+        data = wikipedia_get({"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": limit})
+        for h in data.get("query", {}).get("search", []):
             title = h.get("title", "")
             if title:
                 hits[title] = {"title": title}
@@ -99,14 +158,9 @@ def wikipedia_candidates(topic: Dict[str, str], limit: int = 8) -> List[Dict[str
         low = title.lower()
         if "(disambiguation)" in low or low.startswith("list of ") or low.startswith("index of "):
             continue
-        r = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={"action": "query", "format": "json", "prop": "extracts|info", "explaintext": 1,
-                    "redirects": 1, "inprop": "url", "titles": title},
-            headers=UA, timeout=30,
-        )
-        r.raise_for_status()
-        page = next(iter(r.json()["query"]["pages"].values()))
+        data = wikipedia_get({"action": "query", "format": "json", "prop": "extracts|info", "explaintext": 1,
+                              "redirects": 1, "inprop": "url", "titles": title})
+        page = next(iter(data["query"]["pages"].values()))
         extract = clean_text(page.get("extract", ""))
         final_title = page.get("title", title)
         first = extract[:500].lower()
@@ -137,9 +191,16 @@ def validate_source(topic: Dict[str, str], candidate: Dict[str, str]) -> Tuple[b
 
 
 def wikipedia_search(topic: Dict[str, str]) -> Tuple[str, str, str]:
-    candidates = wikipedia_candidates(topic)
+    try:
+        candidates = wikipedia_candidates(topic)
+    except Exception as e:
+        log(f"Wikipedia lookup unavailable: {e}")
+        return mistral_source_brief(topic)
+
     if not candidates:
-        raise RuntimeError(f"No suitable Wikipedia candidates for topic: {topic.get('title')}")
+        log(f"No suitable Wikipedia candidates for topic: {topic.get('title')}; using fallback fact brief.")
+        return mistral_source_brief(topic)
+
     failures = []
     for cand in candidates[:5]:
         try:
@@ -150,7 +211,9 @@ def wikipedia_search(topic: Dict[str, str]) -> Tuple[str, str, str]:
         if ok:
             return cand["title"], cand["extract"], cand["url"]
         failures.append(f"{cand['title']}: {reason}")
-    raise RuntimeError("No Wikipedia source passed topic validation. " + " | ".join(failures))
+
+    log("Wikipedia candidates did not pass topic validation; using conservative Mistral fact brief instead of failing the run.")
+    return mistral_source_brief(topic)
 
 def mistral_json(messages: List[Dict[str, str]], max_tokens: int = 1800, temperature: float = 0.55) -> Dict[str, Any]:
     key = os.getenv("MISTRAL_API_KEY", "").strip()
@@ -221,10 +284,10 @@ def make_plan(topic: Dict[str, str], source_title: str, extract: str, feedback: 
         raise RuntimeError(f"Wikipedia source is too short for: {source_title}")
     prompt = f"""
 Create an original factual English short-video plan about THIS EXACT TOPIC: {topic.get('title','')}.
-The source article is: {source_title}.
+The factual source/brief is: {source_title}.
 The video is for a faceless educational TikTok aimed at US/UK viewers.
 Target narration: 185-215 words, approximately 65-85 seconds.
-Use ONLY facts supported by the SOURCE below. Never invent names, dates, numbers, quotes, motives, causal claims, or extra people merely because they share a name.
+Use ONLY facts explicitly supported by the SOURCE/FACT BRIEF below. Never invent names, dates, numbers, quotes, motives, causal claims, or extra people merely because they share a name.
 DO NOT broaden the topic into unrelated people, places, namesakes, disambiguation entries, or trivia that is not central to the requested topic.
 Opening must create strong curiosity in the first 1-2 seconds while remaining factual.
 Use conversational American English, short sentences, and a clear narrative arc: hook -> setup -> escalation/explanation -> payoff.
@@ -254,7 +317,7 @@ Requirements:
 
 Previous QA feedback, if any: {feedback or 'none'}
 
-SOURCE ({source_title}):
+SOURCE/FACT BRIEF ({source_title}):
 {extract[:14000]}
 """
     data = mistral_json([
@@ -286,7 +349,7 @@ def qa_plan(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[s
     data = mistral_json([
         {"role": "system", "content": "You are an adversarial fact-checking and retention editor. Return JSON only."},
         {"role": "user", "content": (
-            "Audit this TikTok plan against the exact requested topic and source. Fail it for topic drift, unsupported facts, misleading visual framing, weak first sentence, unrelated namesakes, or repetitive filler. "
+            "Audit this TikTok plan against the exact requested topic and supplied source/fact brief. Fail it for topic drift, unsupported facts, misleading visual framing, weak first sentence, unrelated namesakes, or repetitive filler. "
             f"REQUESTED TOPIC: {topic.get('title','')}\nSOURCE TITLE: {source_title}\nSOURCE: {extract[:9000]}\n"
             f"PLAN TITLE: {plan.get('title','')}\nHOOK: {plan.get('hook','')}\nSCRIPT: {script}\n"
             "Return JSON exactly like {\"pass\":true/false,\"topic_relevance\":0-10,\"factual_grounding\":0-10,\"hook_strength\":0-10,\"visual_coherence\":0-10,\"issues\":[\"...\"]}."
@@ -634,7 +697,7 @@ def main() -> None:
         log(f"Selected topic (attempt {prep_attempt}): {topic['title']}")
         try:
             source_title, extract, source_url = wikipedia_search(topic)
-            log(f"Wikipedia source: {source_title}")
+            log(f"Factual source: {source_title}")
             plan, plan_qa = build_validated_plan(topic, source_title, extract)
             break
         except Exception as e:
