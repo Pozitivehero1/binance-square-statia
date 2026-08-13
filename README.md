@@ -78,3 +78,7 @@ Workflow по-прежнему запускается один раз в сут�
 GitHub-hosted runners используют общие IP-адреса, поэтому Wikimedia иногда отвечает `429 Too Many Requests`. В v2.1 генератор делает несколько коротких повторов запроса, а если Wikipedia всё равно недоступна — **не валит весь запуск**. Он переключается на консервативный fact brief от Mistral и продолжает обычные этапы QA, Pexels, TTS и рендера.
 
 В `metadata.json` поле `source_title` покажет, использовалась ли Wikipedia или `Mistral conservative fact brief`.
+
+## v2.2 reliability fix
+
+`config.json` and `topics.json` are now loaded defensively. If either file is missing, empty, contains a UTF-8 BOM, or has malformed JSON, the generator logs a warning and uses built-in defaults instead of crashing during import/self-test.

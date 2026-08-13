@@ -20,8 +20,50 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent
-CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-TOPICS = json.loads((ROOT / "topics.json").read_text(encoding="utf-8"))
+
+DEFAULT_CFG = {
+    "language": "en",
+    "niche": "technology, science and surprising true history",
+    "mistral_model": "mistral-small-latest",
+    "voice": "en-US-AvaMultilingualNeural",
+    "voice_rate": "-3%",
+    "voice_pitch": "+0Hz",
+    "minimum_seconds": 61.5,
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "crf": 21,
+    "final_crf": 19,
+    "output_dir": "output",
+    "caption_max_words": 6,
+    "caption_max_chars": 34,
+    "caption_font_size": 46,
+    "caption_margin_v": 300,
+    "caption_margin_lr": 105,
+}
+
+def load_json_or_default(path: Path, default):
+    try:
+        raw = path.read_text(encoding="utf-8-sig").strip()
+        if not raw:
+            print(f"WARNING: {path.name} is empty; using built-in defaults.", flush=True)
+            return default.copy() if isinstance(default, dict) else list(default)
+        parsed = json.loads(raw)
+        if isinstance(default, dict):
+            if not isinstance(parsed, dict):
+                raise ValueError(f"{path.name} must contain a JSON object")
+            merged = default.copy()
+            merged.update(parsed)
+            return merged
+        if not isinstance(parsed, list):
+            raise ValueError(f"{path.name} must contain a JSON array")
+        return parsed
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        print(f"WARNING: cannot load {path.name}: {exc}; using built-in fallback.", flush=True)
+        return default.copy() if isinstance(default, dict) else list(default)
+
+CFG = load_json_or_default(ROOT / "config.json", DEFAULT_CFG)
+TOPICS = load_json_or_default(ROOT / "topics.json", [])
 OUT = ROOT / CFG.get("output_dir", "output")
 WORK = ROOT / ".work"
 OUT.mkdir(exist_ok=True)
