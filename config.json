@@ -1,0 +1,15 @@
+{
+  "language": "en",
+  "niche": "technology, science and surprising true history",
+  "mistral_model": "mistral-small-latest",
+  "voice": "en-US-AvaMultilingualNeural",
+  "voice_rate": "-3%",
+  "voice_pitch": "+0Hz",
+  "minimum_seconds": 61.5,
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "crf": 21,
+  "final_crf": 19,
+  "output_dir": "output"
+}
