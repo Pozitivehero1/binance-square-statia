@@ -125,10 +125,14 @@ def _topic_terms(text: str) -> List[str]:
 
 
 def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
-    """Best-effort Wikimedia request. GitHub-hosted runners share IPs and can receive HTTP 429."""
-    delays = [0, 2, 6]
+    """Best-effort Wikimedia request.
+
+    GitHub-hosted runners use shared egress IPs and Wikipedia can return a long Retry-After.
+    Retrying immediately only burns a minute and almost guarantees another 429, so a 429 is
+    treated as a signal to fall back to the Mistral fact brief for this run.
+    """
     last_error: Exception | None = None
-    for attempt, delay in enumerate(delays, 1):
+    for attempt, delay in enumerate((0, 2), 1):
         if delay:
             time.sleep(delay)
         try:
@@ -138,15 +142,16 @@ def wikipedia_get(params: Dict[str, Any], timeout: int = 30) -> Dict[str, Any]:
             )
             if r.status_code == 429:
                 retry_after = r.headers.get("Retry-After", "")
-                log(f"Wikipedia rate-limited (429), attempt {attempt}/{len(delays)}" + (f"; Retry-After={retry_after}" if retry_after else ""))
-                last_error = requests.HTTPError(f"429 Too Many Requests from Wikipedia")
-                continue
+                log("Wikipedia rate-limited (429)" + (f"; Retry-After={retry_after}" if retry_after else "") + "; skipping Wikipedia for this run.")
+                raise RuntimeError("Wikipedia rate-limited (429)")
             r.raise_for_status()
             return r.json()
+        except RuntimeError:
+            raise
         except (requests.RequestException, ValueError) as e:
             last_error = e
-            if attempt < len(delays):
-                log(f"Wikipedia request failed, retrying: {e}")
+            if attempt < 2:
+                log(f"Wikipedia request failed, one retry: {e}")
                 continue
     raise RuntimeError(f"Wikipedia unavailable after retries: {last_error}")
 
@@ -321,6 +326,56 @@ def choose_topic() -> Dict[str, str]:
     return topic
 
 
+def rebalance_plan_length(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any], target_min: int = 185, target_max: int = 215) -> Dict[str, Any]:
+    """Rewrite only when Mistral misses the requested narration length.
+
+    Word count is a formatting problem, not a reason to throw away a good topic. The repair
+    pass preserves the same factual scope and scene order while expanding or compressing.
+    """
+    current_script = clean_text(" ".join(clean_text(str(x.get("narration", ""))) for x in (plan.get("scenes") or [])))
+    current_words = words(current_script)
+    if target_min <= current_words <= target_max:
+        return plan
+
+    log(f"Narration length repair: {current_words} words -> target {target_min}-{target_max}")
+    visual_plan = [
+        {
+            "narration": clean_text(str(x.get("narration", ""))),
+            "pexels_queries": [clean_text(str(q)) for q in (x.get("pexels_queries") or []) if clean_text(str(q))][:3],
+        }
+        for x in (plan.get("scenes") or [])
+    ]
+    repaired = mistral_json([
+        {"role": "system", "content": "You are a precision script-length editor. Return JSON only."},
+        {"role": "user", "content": (
+            f"Repair this short-video plan so TOTAL narration is {target_min}-{target_max} English words. "
+            "Keep the exact topic, same factual scope, and 14-18 scenes. Preserve supported facts; do not add unsupported facts, names, dates, numbers, motives, or causal claims. "
+            "If shortening, remove filler/repetition first. If expanding, explain already-supported facts more clearly instead of inventing new ones. "
+            "Keep each scene concise and keep or improve its Pexels queries. The first sentence must be a specific factual curiosity hook, not generic filler. "
+            "Return the same JSON shape with title, hook, caption, scenes.\n"
+            f"TOPIC: {topic.get('title','')}\nSOURCE LABEL: {source_title}\nSOURCE/FACT BRIEF: {extract[:12000]}\n"
+            f"CURRENT PLAN: {json.dumps({'title': plan.get('title',''), 'hook': plan.get('hook',''), 'caption': plan.get('caption',''), 'scenes': visual_plan}, ensure_ascii=False)}"
+        )}
+    ], max_tokens=3000, temperature=0.15)
+
+    scenes = repaired.get("scenes") or []
+    if not 12 <= len(scenes) <= 20:
+        raise RuntimeError(f"Length repair returned invalid scene count: {len(scenes)}")
+    for scene in scenes:
+        scene["narration"] = clean_text(str(scene.get("narration", "")))
+        qs = [clean_text(str(q)) for q in (scene.get("pexels_queries") or []) if clean_text(str(q))]
+        scene["pexels_queries"] = qs[:3] or [topic.get("search") or source_title]
+    repaired["title"] = clean_text(str(repaired.get("title", plan.get("title", topic.get("title", "")))))
+    repaired["hook"] = clean_text(str(repaired.get("hook", scenes[0].get("narration", "") if scenes else "")))
+    repaired["caption"] = clean_text(str(repaired.get("caption", plan.get("caption", repaired["title"]))))[:180]
+    final_words = words(" ".join(x.get("narration", "") for x in scenes))
+    # Give the repair pass a little tolerance. TTS duration is the final hard constraint.
+    if not 175 <= final_words <= 225:
+        raise RuntimeError(f"Narration length repair failed: {final_words} words")
+    log(f"Narration length repaired to {final_words} words")
+    return repaired
+
+
 def make_plan(topic: Dict[str, str], source_title: str, extract: str, feedback: str = "") -> Dict[str, Any]:
     if len(extract) < 700:
         raise RuntimeError(f"Wikipedia source is too short for: {source_title}")
@@ -372,8 +427,6 @@ SOURCE/FACT BRIEF ({source_title}):
         raise RuntimeError(f"Mistral returned invalid scene count: {len(scenes)}")
     narrations = [clean_text(str(s.get("narration", ""))) for s in scenes]
     total = words(" ".join(narrations))
-    if not 170 <= total <= 230:
-        raise RuntimeError(f"Mistral narration word count out of bounds: {total}")
     for s in scenes:
         qs = [clean_text(str(q)) for q in (s.get("pexels_queries") or []) if clean_text(str(q))]
         s["pexels_queries"] = qs[:3] or [topic.get("search") or source_title]
@@ -383,24 +436,37 @@ SOURCE/FACT BRIEF ({source_title}):
     data["caption"] = clean_text(str(data.get("caption", data["title"])))[:180]
     if "disambiguation" in (data["title"] + " " + data["caption"]).lower():
         raise RuntimeError("Plan drifted into disambiguation content")
+    if not 185 <= total <= 215:
+        data = rebalance_plan_length(topic, source_title, extract, data)
     return data
 
 
 def qa_plan(topic: Dict[str, str], source_title: str, extract: str, plan: Dict[str, Any]) -> Dict[str, Any]:
     script = clean_text(" ".join(s.get("narration", "") for s in plan.get("scenes", [])))
+    visual_plan = [
+        {
+            "narration": clean_text(str(s.get("narration", ""))),
+            "pexels_queries": [clean_text(str(q)) for q in (s.get("pexels_queries") or []) if clean_text(str(q))][:3],
+        }
+        for s in plan.get("scenes", [])
+    ]
     data = mistral_json([
         {"role": "system", "content": "You are an adversarial fact-checking and retention editor. Return JSON only."},
         {"role": "user", "content": (
-            "Audit this TikTok plan against the exact requested topic and supplied source/fact brief. Fail it for topic drift, unsupported facts, misleading visual framing, weak first sentence, unrelated namesakes, or repetitive filler. "
-            f"REQUESTED TOPIC: {topic.get('title','')}\nSOURCE TITLE: {source_title}\nSOURCE: {extract[:9000]}\n"
+            "Audit this TikTok plan against the exact requested topic and supplied source/fact brief. "
+            "Fail it for real topic drift, unsupported factual claims, misleading stock-footage framing, a weak/generic first sentence, unrelated namesakes, or repetitive filler. "
+            "IMPORTANT: SOURCE TITLE/LABEL is metadata only. Never require the script to mention Wikipedia, Mistral, 'fact brief', the source label, or the research method. "
+            "Assess visual_coherence from the supplied Pexels queries: they should be truthful illustrative visuals, not exact historical footage unless the query can plausibly find it. "
+            "Do not penalize a visual merely for being illustrative when narration does not claim it is the exact person/object/event. "
+            f"REQUESTED TOPIC: {topic.get('title','')}\nSOURCE LABEL: {source_title}\nSOURCE/FACT BRIEF: {extract[:9000]}\n"
             f"PLAN TITLE: {plan.get('title','')}\nHOOK: {plan.get('hook','')}\nSCRIPT: {script}\n"
+            f"SCENES + VISUAL QUERIES: {json.dumps(visual_plan, ensure_ascii=False)}\n"
             "Return JSON exactly like {\"pass\":true/false,\"topic_relevance\":0-10,\"factual_grounding\":0-10,\"hook_strength\":0-10,\"visual_coherence\":0-10,\"issues\":[\"...\"]}."
         )}
-    ], max_tokens=500, temperature=0.0)
+    ], max_tokens=650, temperature=0.0)
     scores = [float(data.get(k, 0)) for k in ("topic_relevance", "factual_grounding", "hook_strength", "visual_coherence")]
     data["pass"] = bool(data.get("pass")) and scores[0] >= 8 and scores[1] >= 8 and scores[2] >= 7 and scores[3] >= 7
     return data
-
 
 def build_validated_plan(topic: Dict[str, str], source_title: str, extract: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     feedback = ""

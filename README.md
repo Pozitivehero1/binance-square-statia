@@ -82,3 +82,9 @@ GitHub-hosted runners используют общие IP-адреса, поэт�
 ## v2.2 reliability fix
 
 `config.json` and `topics.json` are now loaded defensively. If either file is missing, empty, contains a UTF-8 BOM, or has malformed JSON, the generator logs a warning and uses built-in defaults instead of crashing during import/self-test.
+
+## v2.3 reliability changes
+- Wikipedia HTTP 429 now triggers an immediate Mistral fact-brief fallback instead of wasting the run on retries that cannot succeed before `Retry-After` expires.
+- Script length misses are repaired automatically. A 156-word or 271-word draft is no longer treated as a bad topic by itself.
+- The repair pass targets 185-215 words, preserves supported facts, removes filler when shortening, and expands only from facts already present in the source brief.
+- QA now receives the actual per-scene Pexels queries and no longer treats internal source labels such as `Mistral conservative fact brief` as content the narration is supposed to mention.
