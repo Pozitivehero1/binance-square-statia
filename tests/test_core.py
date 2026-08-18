@@ -6,6 +6,7 @@ from pathlib import Path
 from models import Script, Scene, SpeechResult, WordTiming, Topic
 from tts import alignment_to_words
 from script_generator import ScriptGenerator
+from topic_source import TopicSource
 from utils import request_with_retry, similarity
 from video_builder import ass_wrap, caption_cues, scene_windows
 
@@ -63,22 +64,19 @@ class CoreTests(unittest.TestCase):
 
     def test_market_percentage_guard(self):
         topic = Topic(
-            "BTC move", "facts", "q", "fp", "CoinGecko /coins/markets", kind="market",
-            data={"change_1h": 1.23, "change_24h": -4.72, "change_7d": 9.81},
+            "BTC move", "facts", "q", "fp", "Binance Spot public market data /api/v3/ticker/24hr", kind="market",
+            data={"change_24h": -4.72},
         )
         ScriptGenerator._validate_market_percentages("BTC снизился на 4,7% за 24 часа.", topic)
-        ScriptGenerator._validate_market_percentages("За 1 час BTC вырос на 1,2%.", topic)
         with self.assertRaises(ValueError):
             ScriptGenerator._validate_market_percentages("BTC вырос на 4,7% за 24 часа.", topic)
-        with self.assertRaises(ValueError):
-            ScriptGenerator._validate_market_percentages("За 1 час BTC снизился на 4,7%.", topic)
         with self.assertRaises(ValueError):
             ScriptGenerator._validate_market_percentages("BTC вырос на 18%.", topic)
 
     def test_market_money_guard(self):
         topic = Topic(
-            "BTC move", "facts", "q", "fp", "CoinGecko /coins/markets", kind="market",
-            data={"price": 105250.0, "high_24h": 107100.0, "low_24h": 102500.0, "volume_24h": 2.4e9, "market_cap": 2.1e12},
+            "BTC move", "facts", "q", "fp", "Binance Spot public market data /api/v3/ticker/24hr", kind="market",
+            data={"price": 105250.0, "high_24h": 107100.0, "low_24h": 102500.0, "volume_24h": 2.4e9},
         )
         ScriptGenerator._validate_market_money_claims("Цена около $105,250. Объём $2.4B.", topic)
         ScriptGenerator._validate_market_money_claims("Максимум за 24 часа $107,100.", topic)
@@ -86,6 +84,19 @@ class CoreTests(unittest.TestCase):
             ScriptGenerator._validate_market_money_claims("Минимум за 24 часа $107,100.", topic)
         with self.assertRaises(ValueError):
             ScriptGenerator._validate_market_money_claims("Цена будет $150,000.", topic)
+
+    def test_binance_market_row_ranking(self):
+        rows = [
+            {"symbol":"BTCUSDT","lastPrice":"65000","priceChangePercent":"-4.2","highPrice":"67000","lowPrice":"64000","quoteVolume":"900000000","weightedAvgPrice":"65500","count":1200000},
+            {"symbol":"USDCUSDT","lastPrice":"1","priceChangePercent":"2.0","highPrice":"1.01","lowPrice":"0.99","quoteVolume":"50000000","weightedAvgPrice":"1","count":10000},
+            {"symbol":"TINYUSDT","lastPrice":"0.1","priceChangePercent":"20","highPrice":"0.12","lowPrice":"0.08","quoteVolume":"1000","weightedAvgPrice":"0.1","count":50},
+        ]
+        ranked = TopicSource._rank_binance_rows(rows)
+        self.assertEqual(len(ranked), 1)
+        item = ranked[0][1]
+        self.assertEqual(item["symbol"], "BTCUSDT")
+        self.assertEqual(item["quote_asset"], "USDT")
+        self.assertAlmostEqual(item["change_24h"], -4.2)
 
 
 if __name__ == "__main__":

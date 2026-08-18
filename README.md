@@ -1,13 +1,13 @@
-# Crypto Shorts Bot 2.1 Production
+# Crypto Shorts Bot 2.2 Production
 
-Бот «под ключ» для автоматической сборки оригинальных вертикальных YouTube Shorts о крипто-механике и рыночных данных с мягким CTA на реферальную ссылку биржи.
+Бот «под ключ» для автоматической сборки оригинальных вертикальных YouTube Shorts о крипто-механике и рыночных данных с мягким CTA на реферальную ссылку Binance.
 
-## Что усилено в 2.1
+## Что усилено в 2.2
 
 - Генерирует **3 редакционных варианта** сценария и выбирает лучший локальным quality-score вместо публикации первого ответа LLM.
 - Сценарий состоит из **5–7 смысловых сцен**: отдельный voice-over, отдельный видеозапрос и короткий экранный тезис для каждой сцены.
 - Контроль повторяемости: история тем, хуков и Pexels video ID между запусками.
-- CoinGecko: реальные 1h / 24h / 7d движения, high/low, volume, market cap; причины движения не выдумываются. Сценарий отклоняется, если модель вставила неподтверждённый процент.
+- Binance Spot: публичные 24h rolling данные по USDT-парам — цена, изменение, high/low, quote volume, weighted average и число сделок. API-ключ Binance не нужен; причины движения не выдумываются.
 - Pexels выбирается **по сценам**, а не случайным пулом. При ошибке/лимите/отсутствии ключа бот сам создаёт локальный абстрактный визуал и продолжает работу.
 - Edge TTS и ElevenLabs теперь возвращают **тайминги речи**. Для ElevenLabs используется endpoint `with-timestamps`; для Edge — WordBoundary.
 - Субтитры привязаны к речи, а не распределены по тексту «на глаз»; длинные русские фразы адаптивно переносятся и не вылезают за края кадра.
@@ -27,14 +27,13 @@
 3. Заполнить:
 
 ```env
-MISTRAL_API_KEY=...
+MISTRAL_API=...
 REFERRAL_URL=https://...
-EXCHANGE_NAME=...
 ```
 
 `PEXELS_API_KEY` теперь не является точкой отказа: без него визуалы будут созданы локально. Но для более живого видеоряда Pexels рекомендуется.
 
-`COINGECKO_API_KEY` рекомендуется для текущих рыночных тем. Без него режим `mixed` автоматически использует evergreen-контент.
+Рыночные темы берутся из публичного Binance Spot market-data endpoint `https://data-api.binance.vision/api/v3/ticker/24hr`; отдельный Binance API key не требуется. Если endpoint временно недоступен, `mixed` автоматически продолжит работу на evergreen-темах.
 
 По умолчанию выбран `mistral-large-latest` для качества сценария. Если важнее снизить стоимость API, можно заменить `MISTRAL_MODEL` на `mistral-small-latest`.
 
@@ -111,7 +110,7 @@ ElevenLabs используется через API с timestamp alignment, чт�
 
 ## Важно: куда вести реферальный трафик
 
-YouTube делает обычные URL в **описаниях и комментариях Shorts некликабельными**. Поэтому версия 2.1 не говорит зрителю «ссылка в описании»: CTA в голосе и на экране ведёт на **первую ссылку в профиле канала**.
+YouTube делает обычные URL в **описаниях и комментариях Shorts некликабельными**. Поэтому версия 2.2 не говорит зрителю «ссылка в описании»: CTA в голосе и на экране ведёт на **первую ссылку в профиле канала**.
 
 Перед первым запуском с реферальным CTA один раз добавьте `REFERRAL_URL` в YouTube Studio → Customization / Настройка канала → Profile / Профиль → Links / Ссылки и поставьте её первой. Сам URL всё равно дублируется в описании вместе с referral disclosure, но основной кликабельный путь — профиль канала.
 
@@ -128,7 +127,7 @@ python youtube_auth.py
 
 5. Появится `token.json`.
 
-> Если вы обновились с версии бота, где OAuth запрашивал только `youtube.upload`, удалите старый `token.json` и один раз снова запустите `youtube_auth.py`: в 2.1 дополнительно используется scope `youtube.force-ssl` для установки disclosure paid promotion.
+> Если вы обновились с версии бота, где OAuth запрашивал только `youtube.upload`, удалите старый `token.json` и один раз снова запустите `youtube_auth.py`: в 2.2 дополнительно используется scope `youtube.force-ssl` для установки disclosure paid promotion.
 
 6. В `.env`:
 
@@ -151,13 +150,12 @@ Workflow: `.github/workflows/shorts.yml`.
 
 Обязательные:
 
-- `MISTRAL_API_KEY`
+- `MISTRAL_API`
 - `REFERRAL_URL`
 
 Рекомендуемые:
 
 - `PEXELS_API_KEY`
-- `COINGECKO_API_KEY`
 
 Опциональные:
 
@@ -168,9 +166,7 @@ Workflow: `.github/workflows/shorts.yml`.
 
 ### Variables
 
-Обязательная:
-
-- `EXCHANGE_NAME`
+Обязательных Variables нет: бренд Binance уже зафиксирован в проекте.
 
 Опциональные: `LANGUAGE`, `MISTRAL_MODEL`, `VOICE_PROVIDER`, `EDGE_VOICE`, `EDGE_RATE`, `AUTO_UPLOAD`, `YOUTUBE_PRIVACY`, `YOUTUBE_PAID_PROMOTION`, `YOUTUBE_SYNTHETIC_MEDIA`.
 

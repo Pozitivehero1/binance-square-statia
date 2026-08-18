@@ -33,10 +33,10 @@ def _float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class Settings:
     # Core
-    mistral_api_key: str = os.getenv("MISTRAL_API_KEY", "").strip()
+    mistral_api_key: str = os.getenv("MISTRAL_API", "").strip()
     mistral_model: str = os.getenv("MISTRAL_MODEL", "mistral-large-latest").strip()
     referral_url: str = os.getenv("REFERRAL_URL", "").strip()
-    exchange_name: str = os.getenv("EXCHANGE_NAME", "YourExchange").strip()
+    exchange_name: str = "Binance"
     language: str = os.getenv("LANGUAGE", "ru").strip().lower()
 
     # Content engine
@@ -49,7 +49,6 @@ class Settings:
     recent_topic_limit: int = _int("RECENT_TOPIC_LIMIT", 60)
     recent_hook_limit: int = _int("RECENT_HOOK_LIMIT", 80)
     recent_media_limit: int = _int("RECENT_MEDIA_LIMIT", 140)
-    coingecko_api_key: str = os.getenv("COINGECKO_API_KEY", "").strip()
 
     # Stock media. Optional: generated motion backgrounds are a built-in fallback.
     pexels_api_key: str = os.getenv("PEXELS_API_KEY", "").strip()
@@ -105,7 +104,7 @@ class Settings:
     def validate(self) -> None:
         missing = []
         if not self.mistral_api_key:
-            missing.append("MISTRAL_API_KEY")
+            missing.append("MISTRAL_API")
         if not self.referral_url or "example.com" in self.referral_url:
             missing.append("REFERRAL_URL")
         if missing:
@@ -113,8 +112,6 @@ class Settings:
         parsed = urlparse(self.referral_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise RuntimeError("REFERRAL_URL must be a complete http(s) URL")
-        if not self.exchange_name or self.exchange_name == "YourExchange":
-            raise RuntimeError("Set EXCHANGE_NAME")
         if not self.mistral_model:
             raise RuntimeError("MISTRAL_MODEL cannot be empty")
         if self.language not in {"ru", "en"}:

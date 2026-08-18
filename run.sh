@@ -10,7 +10,7 @@ if [ ! -d .venv ]; then
 fi
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Created .env. Fill MISTRAL_API_KEY, REFERRAL_URL and EXCHANGE_NAME, then run again." >&2
+  echo "Created .env. Fill MISTRAL_API and REFERRAL_URL, then run again." >&2
   exit 1
 fi
 exec .venv/bin/python main.py "$@"
