@@ -1,80 +1,194 @@
-# TikTok Auto Video v2.4 — Mistral + Pexels
+# Crypto Shorts Bot 2.1 Production
 
-Генератор англоязычных вертикальных роликов 1080×1920 для TikTok. Эта версия собрана после нескольких реальных GitHub Actions прогонов и специально исправляет проблемы, которые проявились в логах: Wikipedia 429, слишком строгий QA, нестабильную длину сценария и переполнение субтитров.
+Бот «под ключ» для автоматической сборки оригинальных вертикальных YouTube Shorts о крипто-механике и рыночных данных с мягким CTA на реферальную ссылку биржи.
 
-## Что делает генератор
+## Что усилено в 2.1
 
-`Mistral topic → Wikipedia (best effort) / Mistral fact brief → Mistral script + scenes → factual QA → edge-tts → compact captions → Pexels per scene → FFmpeg → video.mp4`
+- Генерирует **3 редакционных варианта** сценария и выбирает лучший локальным quality-score вместо публикации первого ответа LLM.
+- Сценарий состоит из **5–7 смысловых сцен**: отдельный voice-over, отдельный видеозапрос и короткий экранный тезис для каждой сцены.
+- Контроль повторяемости: история тем, хуков и Pexels video ID между запусками.
+- CoinGecko: реальные 1h / 24h / 7d движения, high/low, volume, market cap; причины движения не выдумываются. Сценарий отклоняется, если модель вставила неподтверждённый процент.
+- Pexels выбирается **по сценам**, а не случайным пулом. При ошибке/лимите/отсутствии ключа бот сам создаёт локальный абстрактный визуал и продолжает работу.
+- Edge TTS и ElevenLabs теперь возвращают **тайминги речи**. Для ElevenLabs используется endpoint `with-timestamps`; для Edge — WordBoundary.
+- Субтитры привязаны к речи, а не распределены по тексту «на глаз»; длинные русские фразы адаптивно переносятся и не вылезают за края кадра.
+- Экранный hook, scene beats, динамические captions и отдельный CTA.
+- Voice mastering: high-pass/low-pass, compression и loudness normalization. Музыка при наличии тихо подмешивается под голос; битый музыкальный файл автоматически исключается, не ломая весь рендер.
+- Рендер проходит автоматический QA через `ffprobe`: размер, длительность, аудио/видео потоки, кодеки.
+- Если YouTube upload упал, готовый MP4 **не теряется**.
+- Если одна попытка генерации упала, бот делает до `GENERATION_ATTEMPTS` попыток с другой темой.
+- Выводит `.mp4`, `.json` и `.srt`.
+- GitHub Actions имеет удобные мобильные inputs: количество роликов, принудительная тема, переключатель YouTube upload.
+- CTA оптимизирован под реальный Shorts UX: «ссылка в профиле», потому что URL в описании Shorts некликабельны.
 
-На выходе в `output/`:
+## Минимум для запуска
 
-- `video.mp4` — готовый вертикальный ролик;
-- `caption.txt` — подпись TikTok;
-- `script.txt` — полный текст озвучки;
-- `captions.srt` — короткие субтитры;
-- `captions.ass` — финальный стиль субтитров 1080×1920;
-- `plan.json` — сцены и поисковые запросы Pexels;
-- `metadata.json` — тема, источник, QA, длительность, voice rate и использованные Pexels-клипы.
+1. Python 3.11+ и FFmpeg.
+2. Скопировать `.env.example` в `.env`.
+3. Заполнить:
 
-## Главное в v2.4
+```env
+MISTRAL_API_KEY=...
+REFERRAL_URL=https://...
+EXCHANGE_NAME=...
+```
 
-1. **Wikipedia 429 больше не ломает запуск.** После первого `429` Wikipedia отключается до конца текущего workflow. Все следующие темы сразу используют Mistral fact brief и не повторяют запросы с того же GitHub Runner IP.
-2. **Длина сценария больше не является хрупким hard fail.** Цель — 175–225 слов. Если Mistral промахнулся, выполняются до 3 repair-pass. Генератор хранит лучший вариант и допускает безопасный диапазон, вместо того чтобы выбрасывать нормальную тему из‑за 3–10 слов.
-3. **Короткий хороший сценарий не убивает workflow.** Для коротких текстов автоматически выбирается более медленная естественная скорость edge-tts, а затем при необходимости применяется небольшой `atempo` stretch до минимальной длительности.
-4. **QA разделён на fatal и polish.** Unsupported facts, реальный topic drift и обманный визуал — fatal. Слабый hook, повтор, метафора или неидеальный stock — polish. Polish заставляет бота попробовать улучшить сценарий, но не валит весь запуск навсегда.
-5. **До 5 попыток pre-production.** Если тема действительно не проходит фактологию, бот выбирает другую. Это не связано с небольшим промахом по word count.
-6. **Автотемы теперь stock-friendly.** По умолчанию бот предпочитает science / technology / engineering / everyday phenomena и избегает тем, которые требуют точной исторической кинохроники или провоцируют «mystery/conspiracy» формулировки.
-7. **Mistral и Pexels имеют retry на временные 429/5xx.** Кратковременный API сбой не должен сразу останавливать workflow.
-8. **Субтитры остаются компактными.** Обычно до 6 слов / 34 символов, максимум две короткие строки, шрифт 46, безопасные боковые и нижние поля.
-9. **Self-test расширен.** Он проверяет compact captions, word-count repair, отключение Wikipedia после первого 429, QA-классификацию и динамический TTS rate.
+`PEXELS_API_KEY` теперь не является точкой отказа: без него визуалы будут созданы локально. Но для более живого видеоряда Pexels рекомендуется.
 
-## GitHub Secrets
+`COINGECKO_API_KEY` рекомендуется для текущих рыночных тем. Без него режим `mixed` автоматически использует evergreen-контент.
 
-`Settings → Secrets and variables → Actions`
+По умолчанию выбран `mistral-large-latest` для качества сценария. Если важнее снизить стоимость API, можно заменить `MISTRAL_MODEL` на `mistral-small-latest`.
 
-Нужны два секрета:
+## Windows
 
-- `MISTRAL_API_KEY`
-- `PEXELS_API_KEY`
+Первый раз:
 
-Опциональная repository variable:
+```text
+setup_windows.bat
+```
 
-- `MISTRAL_MODEL` — по умолчанию `mistral-small-latest`.
+Потом:
 
-Ключи в файлы проекта не вставляются.
+```text
+run_windows.bat
+```
 
-## Запуск
+## Linux / macOS
 
-`Actions → Generate TikTok Video → Run workflow`
+```bash
+cp .env.example .env
+# заполнить .env
+bash run.sh
+```
 
-`topic` можно оставить пустым. Тогда Mistral сам выберет stock-friendly тему. `niche` тоже можно переопределить вручную.
+## Docker
 
-Workflow также имеет ежедневный cron. При необходимости его можно изменить или удалить в `.github/workflows/generate-video.yml`.
+```bash
+docker build -t crypto-shorts-bot .
+docker run --rm --env-file .env -v "$PWD/output:/app/output" -v "$PWD/music:/app/music:ro" crypto-shorts-bot
+```
 
-## Настройки субтитров
+`.dockerignore` исключает `.env`, OAuth-файлы, state, output и локальное окружение из build context.
 
-В `config.json`:
+## Команды
 
-- `caption_max_words`: `6`
-- `caption_max_chars`: `34`
-- `caption_font_size`: `46`
-- `caption_margin_lr`: `105`
-- `caption_margin_v`: `300`
+```bash
+python main.py                    # 1 автоматическая тема
+python main.py --count 3          # 3 ролика
+python main.py --topic "Funding rate"  # своя тема
+python main.py --no-upload        # никогда не грузить на YouTube
+python main.py --keep-work        # оставить промежуточные файлы
+python main.py --self-test        # FFmpeg/libass check, без API
+```
 
-Эти значения рассчитаны под холст 1080×1920 и оставляют место под интерфейс TikTok.
-
-## Настройки сценария
+## Голос
 
 По умолчанию:
 
-- target: `175–225` слов;
-- hard safe band: `130–250` слов;
-- сцены: обычно `14–18`;
-- pre-production attempts: `5`;
-- минимальная длительность готовой озвучки: `61.5` сек.
+```env
+VOICE_PROVIDER=edge
+EDGE_VOICE=auto
+EDGE_RATE=+4%
+TTS_FALLBACK=1
+```
 
-Точный word count не важнее фактов. Финальная длительность всё равно проверяется после TTS.
+`EDGE_VOICE=auto` автоматически выбирает русский голос для `LANGUAGE=ru` и английский для `LANGUAGE=en`; при желании можно указать конкретное имя Edge-голоса.
 
-## Важное ограничение
+Если основной TTS-провайдер недоступен, бот попробует резервный: ElevenLabs — только когда его ключ и voice ID заполнены; Edge может быть резервом для ElevenLabs.
 
-Pexels — stock-библиотека. Генератор старается делать запросы буквальными и не выдавать современный generic-клип за точную историческую запись, но перед публикацией всё равно стоит быстро просмотреть `video.mp4`. Ссылки на использованные Pexels-клипы сохраняются в `metadata.json`.
+Для ElevenLabs:
+
+```env
+VOICE_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=...
+ELEVENLABS_VOICE_ID=...
+```
+
+ElevenLabs используется через API с timestamp alignment, чтобы субтитры шли по речи.
+
+## Музыка
+
+Положить **только музыку, на которую есть право коммерческого использования**, в `music/` (`mp3`, `wav`, `m4a`, `aac`). Если папка пустая, бот прекрасно работает без музыки. Громкость задаёт `MUSIC_VOLUME`.
+
+## Важно: куда вести реферальный трафик
+
+YouTube делает обычные URL в **описаниях и комментариях Shorts некликабельными**. Поэтому версия 2.1 не говорит зрителю «ссылка в описании»: CTA в голосе и на экране ведёт на **первую ссылку в профиле канала**.
+
+Перед первым запуском с реферальным CTA один раз добавьте `REFERRAL_URL` в YouTube Studio → Customization / Настройка канала → Profile / Профиль → Links / Ссылки и поставьте её первой. Сам URL всё равно дублируется в описании вместе с referral disclosure, но основной кликабельный путь — профиль канала.
+
+## YouTube OAuth
+
+1. В Google Cloud включить YouTube Data API v3.
+2. Создать OAuth Desktop App.
+3. Сохранить JSON как `client_secret.json`.
+4. Один раз на компьютере с браузером:
+
+```bash
+python youtube_auth.py
+```
+
+5. Появится `token.json`.
+
+> Если вы обновились с версии бота, где OAuth запрашивал только `youtube.upload`, удалите старый `token.json` и один раз снова запустите `youtube_auth.py`: в 2.1 дополнительно используется scope `youtube.force-ssl` для установки disclosure paid promotion.
+
+6. В `.env`:
+
+```env
+AUTO_UPLOAD=1
+YOUTUBE_PRIVACY=private
+```
+
+По умолчанию `YOUTUBE_PAID_PROMOTION=1`: проект построен вокруг коммерческой реферальной ссылки, поэтому uploader после загрузки пытается выставить YouTube paid-promotion/commercial-relationship flag. В описании независимо от этого всегда остаётся явный referral disclosure.
+
+Учтите: YouTube может принудительно оставлять API-загрузки `private` для непроверенных API-проектов до прохождения аудита проекта. Это ограничение YouTube, а не бота.
+
+`YOUTUBE_SYNTHETIC_MEDIA=0` не меняйте автоматически: включайте его только если конкретный визуальный контент подпадает под требования YouTube к disclosure синтетически созданного/существенно изменённого реалистичного контента.
+
+## GitHub Actions с телефона
+
+Workflow: `.github/workflows/shorts.yml`.
+
+### Secrets
+
+Обязательные:
+
+- `MISTRAL_API_KEY`
+- `REFERRAL_URL`
+
+Рекомендуемые:
+
+- `PEXELS_API_KEY`
+- `COINGECKO_API_KEY`
+
+Опциональные:
+
+- `ELEVENLABS_API_KEY`
+- `ELEVENLABS_VOICE_ID`
+- `YOUTUBE_CLIENT_SECRET_B64`
+- `YOUTUBE_TOKEN_B64`
+
+### Variables
+
+Обязательная:
+
+- `EXCHANGE_NAME`
+
+Опциональные: `LANGUAGE`, `MISTRAL_MODEL`, `VOICE_PROVIDER`, `EDGE_VOICE`, `EDGE_RATE`, `AUTO_UPLOAD`, `YOUTUBE_PRIVACY`, `YOUTUBE_PAID_PROMOTION`, `YOUTUBE_SYNTHETIC_MEDIA`.
+
+В Actions → **Generate Crypto Shorts → Run workflow** появятся три поля: число роликов, тема (можно оставить пустой), и Upload to YouTube.
+
+## Что появляется в output/
+
+```text
+20260818_120000_topic.mp4
+20260818_120000_topic.json
+20260818_120000_topic.srt
+```
+
+JSON содержит сценарий по сценам, фактическую основу, media credits, script quality score, FFprobe QA и информацию о загрузке.
+
+## Важные практические правила
+
+- Не добавляйте в prompt/тему несуществующие бонусы или гарантированную доходность.
+- Проверяйте условия конкретной реферальной программы биржи и применимое законодательство к рекламе финансовых/крипто-сервисов.
+- Pexels API используется через `/v1/videos/search`; если его материалы реально использованы, описание содержит ссылку на Pexels и credits.
+- Чтобы канал не превращался в однообразную фабрику, не ставьте слишком высокую частоту публикаций сразу. Сначала посмотрите, какие форматы реально удерживают зрителя, и только затем масштабируйте.
