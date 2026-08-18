@@ -12,14 +12,16 @@ from config import Settings
 from models import Topic
 from utils import LOG, request_with_retry, stable_id
 
-# Public Binance market-data-only endpoint. Binance documents this endpoint family
-# for public market data; no API key or signature is needed.
 BINANCE_MARKET_URL = "https://data-api.binance.vision/api/v3/ticker/24hr"
 STABLE_BASES = {"USDT", "USDC", "FDUSD", "TUSD", "DAI", "USDE", "USDP", "PYUSD", "USDS", "USD1", "FRAX", "EURC"}
 LEVERAGED_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 FORMATS = ["counterintuitive", "mistake", "myth_vs_fact", "explainer", "three_checks", "comparison"]
+POPULAR_BASES = {
+    "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "SUI", "LINK", "AVAX", "DOT",
+    "LTC", "BCH", "XLM", "HBAR", "UNI", "ETC", "NEAR", "APT", "ARB", "OP", "ATOM", "FIL",
+    "INJ", "AAVE", "MKR", "RUNE", "PEPE", "SHIB", "WIF", "FET", "RENDER", "TAO", "SEI", "TIA"
+}
 
-# ru title, en title, stock-video query, factual brief.
 EVERGREEN = [
     ("Почему плечо ускоряет ликвидацию", "Why leverage accelerates liquidation", "leverage liquidation crypto trading screen", "Leverage magnifies PnL relative to posted margin; liquidation can occur when margin no longer satisfies maintenance requirements. Exact liquidation rules are venue-specific."),
     ("Что funding rate говорит о фьючерсах", "What funding rate actually tells you", "crypto perpetual futures funding trading", "Perpetual funding is a periodic transfer mechanism between long and short positions. Its sign, interval and formula are venue-specific; it is not a price prediction."),
@@ -69,31 +71,30 @@ class TopicSource:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "CryptoShortsBot/2.2"})
+        self.session.headers.update({"User-Agent": "CryptoShortsBot/2.4"})
         self._market_cache: list[Topic] | None = None
         self._market_cache_at = 0.0
 
     def get_candidates(self) -> list[Topic]:
-        topics: list[Topic] = []
+        market: list[Topic] = []
+        evergreen: list[Topic] = []
         if self.cfg.topic_mode in {"market", "mixed"}:
             try:
-                topics.extend(self._market_topics())
+                market = self._market_topics()
             except Exception as exc:
                 LOG.warning("Binance market data unavailable: %s", exc)
-        if self.cfg.topic_mode in {"evergreen", "mixed"} or not topics:
-            topics.extend(self._evergreen_topics())
-        random.shuffle(topics)
-        return topics
+        if self.cfg.topic_mode in {"evergreen", "mixed"} or not market:
+            evergreen = self._evergreen_topics()
+            random.shuffle(evergreen)
+        return market + evergreen
 
     def _market_topics(self) -> list[Topic]:
         if self._market_cache is not None and time.monotonic() - self._market_cache_at < 300:
             return list(self._market_cache)
-
         resp = request_with_retry(self.session, "GET", BINANCE_MARKET_URL, timeout=30)
         rows = resp.json()
         if not isinstance(rows, list):
             raise RuntimeError("Binance ticker endpoint returned an unexpected payload")
-
         ranked = self._rank_binance_rows(rows)
         retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         out: list[Topic] = []
@@ -101,10 +102,15 @@ class TopicSource:
             base = row["base_asset"]
             pair = row["symbol"]
             ch24 = row["change_24h"]
-            data = {**row, "retrieved_at": retrieved_at}
+            day_range = max(row["high_24h"] - row["low_24h"], 0.0)
+            range_pct = (day_range / row["low_24h"] * 100.0) if row["low_24h"] > 0 else 0.0
+            position = ((row["price"] - row["low_24h"]) / day_range * 100.0) if day_range > 0 else 50.0
+            position = max(0.0, min(100.0, position))
+            data = {**row, "range_24h_pct": range_pct, "position_in_24h_range_pct": position, "retrieved_at": retrieved_at}
             facts = (
                 f"{base} ({pair}); last price {_fmt_usdt(row['price'])}; 24h change {ch24:+.2f}%; "
                 f"24h high {_fmt_usdt(row['high_24h'])}; low {_fmt_usdt(row['low_24h'])}; "
+                f"24h range {range_pct:.2f}%; current price sits {position:.1f}% of the way from the 24h low to the 24h high; "
                 f"24h quote volume {_fmt_usdt(row['volume_24h'], compact=True)}; "
                 f"weighted average {_fmt_usdt(row['weighted_avg_24h'])}; trades {row['trades_24h']:,}."
             )
@@ -140,7 +146,7 @@ class TopicSource:
 
     @staticmethod
     def _rank_binance_rows(rows: list[dict[str, Any]]) -> list[tuple[float, dict[str, Any]]]:
-        ranked: list[tuple[float, dict[str, Any]]] = []
+        parsed: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -165,23 +171,25 @@ class TopicSource:
                 continue
             if min(price, high, low, volume, weighted) <= 0 or trades <= 0:
                 continue
-            if volume < 1_000_000 or abs(change) < 1.25:
+            if volume < 25_000_000 or abs(change) < 1.0:
                 continue
-            liquidity = max(0.0, min(4.0, math.log10(volume) - 6.0))
-            activity = max(0.0, min(2.0, math.log10(max(trades, 1)) / 3.0))
-            score = abs(change) + liquidity * 1.35 + activity
-            ranked.append((score, {
-                "symbol": pair,
-                "base_asset": base,
-                "quote_asset": "USDT",
-                "price": price,
-                "change_24h": change,
-                "high_24h": high,
-                "low_24h": low,
-                "volume_24h": volume,
-                "weighted_avg_24h": weighted,
-                "trades_24h": trades,
-            }))
+            parsed.append({
+                "symbol": pair, "base_asset": base, "quote_asset": "USDT",
+                "price": price, "change_24h": change, "high_24h": high, "low_24h": low,
+                "volume_24h": volume, "weighted_avg_24h": weighted, "trades_24h": trades,
+            })
+        popular = [x for x in parsed if x["base_asset"] in POPULAR_BASES]
+        pool = popular if len(popular) >= 5 else [x for x in parsed if x["volume_24h"] >= 100_000_000]
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for item in pool:
+            volume = item["volume_24h"]
+            trades = item["trades_24h"]
+            change = abs(item["change_24h"])
+            move_score = min(change, 18.0)
+            liquidity = max(0.0, min(5.0, math.log10(volume) - 7.0))
+            activity = max(0.0, min(3.0, math.log10(max(trades, 1)) - 4.0))
+            score = move_score * 1.4 + liquidity * 4.0 + activity * 2.0
+            ranked.append((score, item))
         ranked.sort(key=lambda x: x[0], reverse=True)
         return ranked
 

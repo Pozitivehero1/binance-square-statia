@@ -1,129 +1,124 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 from config import Settings
 from models import MediaClip, Scene
 from utils import LOG, request_with_retry
 
-
-FINANCE_QUERY_WORDS = {
-    "crypto", "cryptocurrency", "bitcoin", "trading", "trader", "market", "stock", "financial",
-    "chart", "exchange", "portfolio", "finance", "investment", "tablet", "phone", "smartphone",
+FINANCE_WORDS = {
+    "crypto", "cryptocurrency", "bitcoin", "trading", "trader", "market", "finance", "financial",
+    "chart", "exchange", "portfolio", "investment", "stocks", "stock", "phone", "smartphone",
+    "tablet", "computer", "laptop", "screen", "candlestick", "currency", "money",
 }
-GRAPHIC_TERMS = (
-    "order book", "bid and ask", "bid ask", "spread", "liquidity", "market order", "limit order",
-    "maker", "taker", "fees", "funding rate", "open interest", "market cap", "fdv", "slippage",
-    "candlestick", "price chart", "volume chart", "liquidation", "margin", "pnl", "take-profit",
-    "trailing stop", "stablecoin", "seed phrase",
-)
+SECURITY_WORDS = {"security", "cyber", "phishing", "password", "authentication", "2fa", "hacker", "data"}
+BAD_SLUG_WORDS = {
+    "clothes", "fashion", "shopping", "dress", "food", "cooking", "restaurant", "wedding", "makeup",
+    "fitness", "gym", "garden", "car", "driving", "dog", "cat", "baby", "coffee", "beach", "vacation",
+}
 
 
 class MediaProvider:
-    """Scene-aware visual provider.
+    """Select cinematic stock first; use clean motion-background art only as fallback.
 
-    Pexels is used for footage that stock libraries can realistically represent. Exact
-    numbers, order-book mechanics, comparisons and CTA screens are rendered locally so
-    the bot never pretends an unrelated stock clip shows data that are not actually there.
+    Exact values are shown by the typography layer in video_builder.py. The background
+    never pretends that a stock clip contains the exact price/volume being narrated.
+    This keeps footage honest while avoiding slide-deck style number cards.
     """
 
     def __init__(self, cfg: Settings):
         self.cfg = cfg
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": cfg.pexels_api_key, "User-Agent": "CryptoShortsBot/2.3"})
+        self.session.headers.update({"Authorization": cfg.pexels_api_key, "User-Agent": "CryptoShortsBot/2.4"})
         self.download_session = requests.Session()
-        self.download_session.headers.update({"User-Agent": "CryptoShortsBot/2.3"})
+        self.download_session.headers.update({"User-Agent": "CryptoShortsBot/2.4"})
 
     def collect(self, scenes: list[Scene], work_dir: Path, recent_ids: list[int] | None = None) -> list[MediaClip]:
         recent = {int(x) for x in (recent_ids or []) if str(x).isdigit()}
-        selected: list[MediaClip] = []
         used: set[int] = set()
+        selected: list[MediaClip] = []
         total = len(scenes)
+
         for idx, scene in enumerate(scenes):
-            kind = self._graphic_kind(scene, idx, total)
-            if kind:
-                clip = self._generated(scene, work_dir, idx, kind=kind)
-                LOG.info("Scene %d media: generated %s graphic", idx + 1, kind)
+            if idx == total - 1:
+                clip = self._generated(scene, work_dir, idx, kind="cta")
                 selected.append(clip)
+                LOG.info("Scene %d media: generated cinematic CTA background", idx + 1)
                 continue
 
             clip: MediaClip | None = None
             if self.cfg.pexels_api_key:
                 try:
-                    query = self._stock_query(scene.visual_query)
-                    candidates = [c for c in self._search(query) if c.video_id not in used]
-                    # Refuse visually suspicious search results instead of forcing a bad stock clip.
-                    candidates = [c for c in candidates if self._relevance(c, query) >= 0.42]
-                    if candidates:
-                        candidates.sort(key=lambda c: self._score(c, recent, query), reverse=True)
-                        clip = candidates[0]
+                    queries = self._query_candidates(scene)
+                    best: tuple[float, MediaClip] | None = None
+                    for q_index, query in enumerate(queries):
+                        candidates = [c for c in self._search(query) if c.video_id not in used]
+                        candidates = [c for c in candidates if self._relevance(c, query) >= 0.38]
+                        if candidates:
+                            candidates.sort(key=lambda c: self._score(c, recent, query), reverse=True)
+                            candidate = candidates[0]
+                            score = self._score(candidate, recent, query)
+                            if best is None or score > best[0]:
+                                best = (score, candidate)
+                            if score >= 78 or q_index == len(queries) - 1:
+                                break
+                    if best:
+                        clip = best[1]
                         out = work_dir / f"pexels_{idx+1:02d}.mp4"
                         self._download(clip.url, out)
                         clip.local_path = out
                         used.add(int(clip.video_id or 0))
-                        LOG.info("Scene %d media: Pexels #%s — %s", idx + 1, clip.video_id, query)
-                    else:
-                        LOG.info("Scene %d: no sufficiently relevant Pexels result; using graphic", idx + 1)
+                        LOG.info("Scene %d media: Pexels #%s — %s", idx + 1, clip.video_id, clip.query)
                 except Exception as exc:
-                    LOG.warning("Pexels scene %d failed (%s); using generated visual", idx + 1, exc)
+                    LOG.warning("Pexels scene %d failed (%s); using cinematic fallback", idx + 1, exc)
+
             if clip is None:
-                clip = self._generated(scene, work_dir, idx, kind="ambient")
-                LOG.info("Scene %d media: generated ambient fallback", idx + 1)
+                kind = "security" if self._is_security(scene) else "market"
+                clip = self._generated(scene, work_dir, idx, kind=kind)
+                LOG.info("Scene %d media: generated cinematic %s fallback", idx + 1, kind)
             selected.append(clip)
         return selected
 
+    def _query_candidates(self, scene: Scene) -> list[str]:
+        raw = self._stock_query(scene.visual_query)
+        q = (scene.visual_query + " " + scene.voiceover + " " + scene.overlay_text).lower()
+        if self._is_security(scene):
+            fallbacks = ["cyber security smartphone", "data security computer screen"]
+        elif any(k in q for k in ("trader", "phone", "smartphone", "app", "mobile")):
+            fallbacks = ["trader smartphone finance", "cryptocurrency trading phone"]
+        elif any(k in q for k in ("chart", "price", "candlestick", "volume", "market")):
+            fallbacks = ["financial trading screen", "cryptocurrency market chart"]
+        else:
+            fallbacks = ["cryptocurrency trading screen", "finance smartphone market"]
+        out: list[str] = []
+        for x in [raw, *fallbacks]:
+            x = re.sub(r"\s+", " ", x).strip()
+            if x and x not in out:
+                out.append(x)
+        return out[:2]
+
+    @staticmethod
+    def _is_security(scene: Scene) -> bool:
+        q = (scene.visual_query + " " + scene.voiceover).lower()
+        return any(x in q for x in SECURITY_WORDS)
+
     @staticmethod
     def _stock_query(query: str) -> str:
-        """Turn an LLM visual description into something a stock search engine can satisfy."""
-        q = re.sub(r"['\"“”‘’]", " ", query.lower())
-        q = re.sub(r"\b(split[- ]screen|animated?|animation|highlight(?:ed)?|showing|displaying|with text|exact)\b", " ", q)
+        q = re.sub(r"['\"“”‘’]", " ", str(query).lower())
+        q = re.sub(r"\b(split[- ]screen|animated?|animation|highlight(?:ed)?|showing|displaying|exact|binance|logo)\b", " ", q)
         q = re.sub(r"\b\d[\d,.]*\b", " ", q)
-        q = re.sub(r"\s+", " ", q).strip(" ,.-")
-        words = q.split()
-        if len(words) > 9:
-            words = words[:9]
-        return " ".join(words) or "cryptocurrency trading smartphone"
-
-    @staticmethod
-    def _graphic_kind(scene: Scene, index: int, total: int) -> str | None:
-        if index == total - 1:
-            return "cta"
-        q = (scene.visual_query + " " + scene.voiceover + " " + scene.overlay_text).lower()
-        numeric = bool(re.search(r"(?:\$|€|₽|\b\d[\d\s,.]*\s*%|\b\d{2,}[\d\s,.]*)", scene.voiceover))
-        bidask = "bid" in q and "ask" in q
-        spread = "spread" in q or "спред" in q
-
-        # Exact numbers are never delegated to stock footage, regardless of LLM mode.
-        if numeric and (bidask or spread):
-            return "orderbook"
-        if numeric:
-            return "data"
-
-        # Respect the editor's visual plan when it is safe to do so. This prevents a
-        # seven-scene explainer from turning into seven nearly identical infographics.
-        if scene.visual_mode == "stock":
-            return None
-
-        if any(x in q for x in ("commission", "комисси", "depth", "глубин", "liquidity", "ликвид")):
-            return "concept"
-        if spread:
-            return "orderbook"
-        if bidask or any(x in q for x in ("buyer", "seller", "покупат", "продав")):
-            return "comparison"
-        if scene.visual_mode == "graphic":
-            if any(x in q for x in ("security", "phishing", "2fa", "cyber")):
-                return "ambient"
-            return "concept"
-        if any(term in q for term in GRAPHIC_TERMS):
-            return "concept"
-        return None
+        q = re.sub(r"[^a-z0-9 -]+", " ", q)
+        stop = {"the", "a", "an", "of", "with", "and", "on", "in", "show", "shows"}
+        words = [w for w in q.split() if w not in stop]
+        return " ".join(words[:7]) or "cryptocurrency trading screen"
 
     def _search(self, query: str) -> list[MediaClip]:
         resp = request_with_retry(
@@ -148,18 +143,24 @@ class MediaProvider:
 
     @staticmethod
     def _best_file(files: list[dict]) -> dict | None:
-        usable = [f for f in files if f.get("link") and f.get("width") and f.get("height") and str(f.get("file_type", "video/mp4")).endswith("mp4")]
+        usable = [
+            f for f in files
+            if f.get("link") and f.get("width") and f.get("height")
+            and str(f.get("file_type", "video/mp4")).endswith("mp4")
+        ]
         if not usable:
             return None
+
         def score(f: dict) -> float:
             w, h = int(f["width"]), int(f["height"])
             ratio = h / max(w, 1)
-            portrait = 60 if h > w else -80
-            ratio_score = -abs(ratio - 16 / 9) * 34
-            resolution = min(w, 1080) / 18
-            oversize = -30 if w > 1920 else 0
-            quality = 8 if str(f.get("quality") or "").lower() == "hd" else 0
-            return portrait + ratio_score + resolution + oversize + quality
+            portrait = 90 if h > w else -120
+            ratio_score = -abs(ratio - 16 / 9) * 40
+            resolution = min(w, 1080) / 14
+            quality = 14 if str(f.get("quality") or "").lower() == "hd" else 0
+            huge = -25 if w > 1920 else 0
+            return portrait + ratio_score + resolution + quality + huge
+
         return max(usable, key=score)
 
     @staticmethod
@@ -172,32 +173,41 @@ class MediaProvider:
 
     @classmethod
     def _relevance(cls, clip: MediaClip, query: str) -> float:
-        """Conservative lexical sanity-check based on Pexels' human-readable URL slug."""
         q = {x for x in re.findall(r"[a-z]+", query.lower()) if len(x) > 2}
         slug = cls._slug_tokens(clip.pexels_url)
         if not slug:
-            return 0.5
-        direct = len(q & slug) / max(1, min(len(q), 5))
-        finance_requested = bool(q & FINANCE_QUERY_WORDS)
-        finance_slug = bool(slug & FINANCE_QUERY_WORDS)
-        if finance_requested and not finance_slug:
-            # Blocks examples such as "person browsing clothes on laptop" for a trading scene.
-            return min(0.25, direct)
-        semantic_bonus = 0.35 if finance_requested and finance_slug else 0.12
-        device_bonus = 0.12 if slug & {"phone", "smartphone", "tablet", "laptop", "computer"} else 0.0
-        return min(1.0, direct + semantic_bonus + device_bonus)
+            return 0.45
+        if slug & BAD_SLUG_WORDS:
+            return 0.05
+        direct = len(q & slug) / max(1, min(5, len(q)))
+        finance_requested = bool(q & FINANCE_WORDS)
+        finance_slug = bool(slug & FINANCE_WORDS)
+        security_requested = bool(q & SECURITY_WORDS)
+        security_slug = bool(slug & SECURITY_WORDS)
+        if finance_requested and not finance_slug and not security_slug:
+            return min(0.26, direct)
+        if security_requested and not security_slug and not finance_slug:
+            return min(0.28, direct)
+        bonus = 0.38 if finance_slug else 0.0
+        if security_slug:
+            bonus += 0.28
+        if slug & {"phone", "smartphone", "tablet", "laptop", "computer", "screen"}:
+            bonus += 0.12
+        return min(1.0, direct + bonus)
 
     @classmethod
     def _score(cls, clip: MediaClip, recent: set[int], query: str) -> float:
         score = cls._relevance(clip, query) * 120
         if clip.video_id in recent:
-            score -= 90
+            score -= 100
         ratio = clip.height / max(clip.width, 1)
-        score -= abs(ratio - 16 / 9) * 20
-        score += min(clip.width, 1080) / 54
-        if 4 <= clip.duration <= 25:
-            score += 12
-        return score + random.uniform(0, 1.5)
+        score -= abs(ratio - 16 / 9) * 24
+        score += min(clip.width, 1080) / 45
+        if 5 <= clip.duration <= 24:
+            score += 15
+        elif clip.duration < 3:
+            score -= 20
+        return score + random.uniform(0, 1.2)
 
     def _download(self, url: str, out: Path) -> None:
         resp = request_with_retry(self.download_session, "GET", url, stream=True, timeout=90)
@@ -220,140 +230,103 @@ class MediaProvider:
         finally:
             resp.close()
 
-    @staticmethod
-    def _font(size: int, bold: bool = False):
-        paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        ]
-        for p in paths:
-            try:
-                return ImageFont.truetype(p, size=size)
-            except OSError:
-                continue
-        return ImageFont.load_default()
-
-    @staticmethod
-    def _fit_text(draw: ImageDraw.ImageDraw, text: str, max_width: int, start_size: int, *, bold: bool = True):
-        for size in range(start_size, 23, -2):
-            font = MediaProvider._font(size, bold=bold)
-            box = draw.textbbox((0, 0), text, font=font)
-            if box[2] - box[0] <= max_width:
-                return font
-        return MediaProvider._font(24, bold=bold)
-
-    @staticmethod
-    def _extract_numbers(text: str) -> list[str]:
-        vals = re.findall(r"(?:[$€₽]\s*)?\d[\d\s,.]*(?:\s*%|\s*(?:доллар(?:а|ов)?|USD|USDT))?", text, flags=re.IGNORECASE)
-        return [re.sub(r"\s+", " ", x).strip(" .,;:") for x in vals if re.search(r"\d", x)][:4]
-
-    def _generated(self, scene: Scene, work_dir: Path, index: int, *, kind: str | None = None) -> MediaClip:
-        kind = kind or self._graphic_kind(scene, index, index + 2) or "ambient"
+    def _generated(self, scene: Scene, work_dir: Path, index: int, *, kind: str = "market") -> MediaClip:
+        """Generate a text-free cinematic fallback, never a dashboard/card."""
         path = work_dir / f"generated_{index+1:02d}_{kind}.png"
         seed = int(hashlib.sha1((scene.visual_query + scene.voiceover + str(index)).encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(seed)
         w, h = 1080, 1920
-        palette = rng.choice([
-            ((6, 12, 27), (15, 47, 72)), ((12, 9, 28), (55, 22, 72)),
-            ((5, 22, 27), (10, 64, 61)), ((19, 11, 18), (77, 31, 33)),
-        ])
-        strip = Image.new("RGB", (1, h))
-        px = strip.load()
-        for y in range(h):
-            t = y / max(1, h - 1)
-            px[0, y] = tuple(int(a * (1 - t) + b * t) for a, b in zip(palette[0], palette[1]))
-        img = strip.resize((w, h))
+
+        accent = rng.choice([(11, 153, 166), (89, 85, 220), (193, 70, 101), (21, 122, 88)])
+        sw, sh = 270, 480
+        small = Image.new("RGB", (sw, sh), (5, 8, 15))
+        pix = small.load()
+        gx, gy = rng.randint(45, 225), rng.randint(90, 365)
+        for y in range(sh):
+            for x in range(sw):
+                base = 5 + int(8 * y / sh)
+                dx, dy = (x - gx) / sw, (y - gy) / sh
+                glow = math.exp(-(dx * dx + dy * dy) / 0.08)
+                pix[x, y] = tuple(min(255, int(base + c * 0.28 * glow)) for c in accent)
+        img = small.resize((w, h), Image.Resampling.BICUBIC)
+
         draw = ImageDraw.Draw(img, "RGBA")
+        for x in range(-300, w + 400, 115):
+            draw.line((x, 260, x + 560, 1650), fill=(255, 255, 255, 10), width=1)
+        for y in range(320, 1660, 120):
+            draw.line((70, y, w - 70, y), fill=(255, 255, 255, 9), width=1)
 
-        # Premium-looking ambient depth without external assets.
-        for _ in range(14):
-            x = rng.randint(-120, w + 120); y = rng.randint(0, h); r = rng.randint(45, 220)
-            draw.ellipse((x-r, y-r, x+r, y+r), outline=(255, 255, 255, rng.randint(7, 18)), width=rng.randint(1, 3))
-        for y in range(260, 1580, 110):
-            draw.line((80, y, w-80, y), fill=(255, 255, 255, 12), width=1)
-
-        title_font = self._font(58, bold=True)
-        small_font = self._font(34, bold=False)
-        value_font = self._font(72, bold=True)
-
-        if kind == "cta":
-            # Text is added later by ASS so it stays perfectly readable and timed. The
-            # background supplies only a clean profile/link visual to avoid duplication.
-            draw.rounded_rectangle((155, 720, 925, 1510), radius=72, fill=(4, 8, 18, 155), outline=(255, 255, 255, 52), width=3)
-            draw.rounded_rectangle((285, 870, 795, 1260), radius=58, fill=(255, 255, 255, 20), outline=(255, 255, 255, 68), width=3)
-            draw.ellipse((475, 930, 605, 1060), outline=(255, 255, 255, 190), width=9)
-            draw.arc((420, 1035, 660, 1250), 200, 340, fill=(255, 255, 255, 190), width=9)
-            # Simple chain-link hint below the profile card.
-            draw.arc((395, 1325, 545, 1455), 205, 25, fill=(255,255,255,145), width=10)
-            draw.arc((535, 1325, 685, 1455), 155, 335, fill=(255,255,255,145), width=10)
-        elif kind in {"orderbook", "comparison"}:
-            left = (100, 520, 505, 1240); right = (575, 520, 980, 1240)
-            draw.rounded_rectangle(left, radius=42, fill=(26, 143, 115, 70), outline=(122, 235, 207, 130), width=4)
-            draw.rounded_rectangle(right, radius=42, fill=(180, 66, 76, 65), outline=(255, 145, 153, 125), width=4)
-            draw.text((302, 600), "BID", font=title_font, anchor="mm", fill=(185, 255, 230, 240))
-            draw.text((777, 600), "ASK", font=title_font, anchor="mm", fill=(255, 201, 205, 240))
-            nums = self._extract_numbers(scene.voiceover)
-            if nums:
-                bid = nums[0]
-                ask = nums[1] if len(nums) > 1 else ("ЛУЧШАЯ ЦЕНА" if self.cfg.language == "ru" else "BEST PRICE")
-            else:
-                bid = "ЛУЧШАЯ ЦЕНА" if self.cfg.language == "ru" else "BEST BID"
-                ask = "ЛУЧШАЯ ЦЕНА" if self.cfg.language == "ru" else "BEST ASK"
-            draw.text((302, 735), bid, font=self._fit_text(draw, bid, 330, 68), anchor="mm", fill=(255,255,255,245))
-            draw.text((777, 735), ask, font=self._fit_text(draw, ask, 330, 68), anchor="mm", fill=(255,255,255,245))
-            for row in range(7):
-                yy = 840 + row * 52
-                bw = rng.randint(100, 300)
-                draw.rounded_rectangle((140, yy, 140+bw, yy+24), radius=8, fill=(126, 238, 207, 90))
-                bw2 = rng.randint(100, 300)
-                draw.rounded_rectangle((940-bw2, yy, 940, yy+24), radius=8, fill=(255, 145, 153, 85))
-        elif kind == "data":
-            nums = self._extract_numbers(scene.voiceover)
-            draw.rounded_rectangle((105, 430, 975, 1390), radius=64, fill=(3, 8, 18, 175), outline=(255,255,255,55), width=3)
-            label = scene.overlay_text.upper()[:32] or "DATA"
-            font = self._fit_text(draw, label, 800, 60)
-            draw.text((540, 560), label, font=font, anchor="mm", fill=(255,255,255,230))
-            if nums:
-                y = 780
-                for n in nums[:3]:
-                    vf = self._fit_text(draw, n, 760, 110)
-                    draw.text((540, y), n, font=vf, anchor="mm", fill=(255,255,255,245))
-                    y += 230
-            else:
-                draw.text((540, 920), "MARKET DATA", font=value_font, anchor="mm", fill=(255,255,255,235))
-        elif kind == "concept":
-            q = (scene.visual_query + " " + scene.overlay_text).lower()
-            if any(x in q for x in ("wallet", "seed", "custody", "stablecoin")):
-                draw.rounded_rectangle((170, 530, 910, 1250), radius=72, fill=(0,0,0,75), outline=(255,255,255,90), width=4)
-                draw.rounded_rectangle((305, 700, 835, 1070), radius=50, fill=(255,255,255,28), outline=(255,255,255,100), width=4)
-                draw.ellipse((665, 815, 755, 905), outline=(255,255,255,190), width=7)
-            else:
-                # Abstract market mechanism: depth bars + central axis.
-                mid = 950
-                draw.line((120, mid, 960, mid), fill=(255,255,255,105), width=4)
-                for i in range(12):
-                    yy1 = mid - 90 - i*50; yy2 = mid + 55 + i*50
-                    draw.rounded_rectangle((140, yy1, rng.randint(470, 800), yy1+28), radius=9, fill=(112,225,202,rng.randint(50,100)))
-                    x = rng.randint(280, 610)
-                    draw.rounded_rectangle((x, yy2, 940, yy2+28), radius=9, fill=(245,132,145,rng.randint(50,95)))
+        if kind == "security":
+            nodes = [(rng.randint(80, w - 80), rng.randint(380, 1480)) for _ in range(30)]
+            for i, a in enumerate(nodes):
+                near = sorted(nodes, key=lambda b: (a[0]-b[0])**2 + (a[1]-b[1])**2)[1:3]
+                for b in near:
+                    draw.line((*a, *b), fill=(*accent, 30), width=2)
+            for x, y in nodes:
+                r = rng.randint(3, 8)
+                draw.ellipse((x-r, y-r, x+r, y+r), fill=(*accent, rng.randint(90, 180)))
+            pts = [(540, 640), (720, 720), (690, 1040), (540, 1210), (390, 1040), (360, 720)]
+            draw.line(pts + [pts[0]], fill=(255, 255, 255, 105), width=8, joint="curve")
+        elif kind == "cta":
+            for r, alpha in [(330, 15), (250, 22), (170, 30)]:
+                draw.ellipse((540-r, 880-r, 540+r, 880+r), outline=(*accent, alpha), width=5)
+            points = [(200, 1320), (360, 1210), (520, 1250), (680, 1040), (870, 900)]
+            draw.line(points, fill=(255, 255, 255, 105), width=9, joint="curve")
+            draw.polygon([(870, 900), (815, 910), (855, 955)], fill=(255, 255, 255, 130))
         else:
-            # General fallback. For security-oriented scenes draw network/lock; otherwise charts.
-            q = scene.visual_query.lower()
-            if any(k in q for k in ("security", "phishing", "2fa", "authentication", "cyber")):
-                nodes = [(rng.randint(130, w-130), rng.randint(430, 1390)) for _ in range(18)]
-                for a, b in zip(nodes, nodes[1:]): draw.line((*a, *b), fill=(255,255,255,40), width=2)
-                for x, y in nodes: draw.ellipse((x-12,y-12,x+12,y+12), fill=(255,255,255,110))
-                cx, cy = w//2, 920
-                draw.arc((cx-145, cy-260, cx+145, cy+45), 190, 350, fill=(255,255,255,190), width=18)
-                draw.rounded_rectangle((cx-190,cy-80,cx+190,cy+280), radius=42, outline=(255,255,255,190), width=10, fill=(0,0,0,45))
+            variant = index % 4
+            if variant in {0, 1}:
+                points = []
+                y = rng.randint(760, 1180)
+                for i in range(25):
+                    x = 45 + i * 44
+                    y += rng.randint(-95, 85)
+                    y = max(500, min(1390, y))
+                    points.append((x, y))
+                    if variant == 0 or i % 2 == 0:
+                        wick = rng.randint(40, 115)
+                        body = rng.randint(24, 66)
+                        up = rng.choice([True, True, False])
+                        c = (52, 215, 160, 85) if up else (244, 93, 119, 85)
+                        draw.line((x, y - wick, x, y + wick), fill=c, width=3)
+                        draw.rounded_rectangle((x-8, y-body//2, x+8, y+body//2), radius=4, fill=c)
+                glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                gd = ImageDraw.Draw(glow, "RGBA")
+                gd.line(points, fill=(*accent, 125), width=18, joint="curve")
+                glow = glow.filter(ImageFilter.GaussianBlur(18))
+                img = Image.alpha_composite(img.convert("RGBA"), glow)
+                draw = ImageDraw.Draw(img, "RGBA")
+                draw.line(points, fill=(*accent, 195), width=5, joint="curve")
+                for i in range(30):
+                    x = 45 + i * 34
+                    bh = rng.randint(30, 190)
+                    draw.rounded_rectangle((x, 1500-bh, x+14, 1500), radius=5, fill=(*accent, rng.randint(25, 70)))
+            elif variant == 2:
+                draw.line((540, 430, 540, 1430), fill=(255,255,255,45), width=2)
+                for row in range(15):
+                    y = 500 + row * 62
+                    left = rng.randint(80, 450)
+                    right = rng.randint(630, 1000)
+                    draw.line((left, y, 520, y), fill=(54, 215, 164, rng.randint(35,90)), width=rng.randint(5,12))
+                    draw.line((560, y+20, right, y+20), fill=(244, 93, 119, rng.randint(35,90)), width=rng.randint(5,12))
+                for r in (130, 230, 360):
+                    draw.arc((540-r, 900-r, 540+r, 900+r), 205, 335, fill=(*accent, 40), width=4)
             else:
-                last = 980; points=[]
-                for i in range(22):
-                    x = 90 + i*43; last += rng.randint(-70,70); last=max(520,min(1320,last)); points.append((x,last))
-                    draw.line((x,last-65,x,last+65), fill=(255,255,255,75), width=3)
-                    draw.rounded_rectangle((x-10,last-25,x+10,last+25), radius=4, fill=(255,255,255,95))
-                draw.line(points, fill=(255,255,255,135), width=5, joint="curve")
+                for x in range(90, 1020, 90):
+                    draw.line((x, 430, x, 1450), fill=(255,255,255,8), width=1)
+                for _ in range(18):
+                    x1 = rng.randint(80, 850); y1 = rng.randint(500, 1320)
+                    x2 = min(1030, x1 + rng.randint(80, 260)); y2 = y1 + rng.randint(-120,120)
+                    draw.line((x1,y1,x2,y2), fill=(*accent,rng.randint(35,100)), width=rng.randint(2,6))
+                    draw.ellipse((x2-5,y2-5,x2+5,y2+5), fill=(255,255,255,100))
 
-
-        img.save(path, quality=94)
-        return MediaClip(video_id=None, query=scene.visual_query, local_path=path, source=f"generated:{kind}", is_image=True, width=w, height=h, duration=12)
+        vignette = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        vd = ImageDraw.Draw(vignette, "RGBA")
+        vd.rectangle((0, 0, w, 260), fill=(0, 0, 0, 55))
+        vd.rectangle((0, 1450, w, h), fill=(0, 0, 0, 95))
+        img = Image.alpha_composite(img.convert("RGBA"), vignette).convert("RGB")
+        img.save(path, quality=95)
+        return MediaClip(
+            video_id=None, query=scene.visual_query, local_path=path, source=f"generated:{kind}",
+            is_image=True, width=w, height=h, duration=12,
+        )

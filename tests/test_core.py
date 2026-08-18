@@ -66,9 +66,11 @@ class CoreTests(unittest.TestCase):
     def test_market_percentage_guard(self):
         topic = Topic(
             "BTC move", "facts", "q", "fp", "Binance Spot public market data /api/v3/ticker/24hr", kind="market",
-            data={"change_24h": -4.72},
+            data={"change_24h": -4.72, "range_24h_pct": 8.12, "position_in_24h_range_pct": 22.4},
         )
         ScriptGenerator._validate_market_percentages("BTC снизился на 4,7% за 24 часа.", topic)
+        ScriptGenerator._validate_market_percentages("Диапазон за 24 часа составил 8,1%.", topic)
+        ScriptGenerator._validate_market_percentages("Цена находится на 22,4% пути от минимума до максимума.", topic)
         with self.assertRaises(ValueError):
             ScriptGenerator._validate_market_percentages("BTC вырос на 4,7% за 24 часа.", topic)
         with self.assertRaises(ValueError):
@@ -91,6 +93,7 @@ class CoreTests(unittest.TestCase):
             {"symbol":"BTCUSDT","lastPrice":"65000","priceChangePercent":"-4.2","highPrice":"67000","lowPrice":"64000","quoteVolume":"900000000","weightedAvgPrice":"65500","count":1200000},
             {"symbol":"USDCUSDT","lastPrice":"1","priceChangePercent":"2.0","highPrice":"1.01","lowPrice":"0.99","quoteVolume":"50000000","weightedAvgPrice":"1","count":10000},
             {"symbol":"TINYUSDT","lastPrice":"0.1","priceChangePercent":"20","highPrice":"0.12","lowPrice":"0.08","quoteVolume":"1000","weightedAvgPrice":"0.1","count":50},
+            {"symbol":"KORUBUSDT","lastPrice":"18","priceChangePercent":"-24","highPrice":"24","lowPrice":"17","quoteVolume":"12000000","weightedAvgPrice":"21","count":51000},
         ]
         ranked = TopicSource._rank_binance_rows(rows)
         self.assertEqual(len(ranked), 1)
@@ -118,13 +121,14 @@ class CoreTests(unittest.TestCase):
         self.assertLess(MediaProvider._relevance(bad, bad.query), 0.42)
         self.assertGreaterEqual(MediaProvider._relevance(good, good.query), 0.42)
 
-    def test_graphic_routing_for_exact_numbers_and_cta(self):
-        scenes = [
-            Scene("Бид 50 000, аск 50 100. Спред 100 долларов.", "trading numbers screen", "СПРЕД"),
-            Scene("Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone app", "BINANCE"),
-        ]
-        self.assertEqual(MediaProvider._graphic_kind(scenes[0], 0, 2), "orderbook")
-        self.assertEqual(MediaProvider._graphic_kind(scenes[1], 1, 2), "cta")
+    def test_market_media_prefers_stock_queries_not_number_cards(self):
+        from config import Settings
+        provider = MediaProvider(Settings(language="ru", pexels_api_key="x"))
+        scene = Scene("Цена 50 000 USDT, изменение -4,2%.", "price chart sharp decline", "-4,2% / 24H", "stock")
+        queries = provider._query_candidates(scene)
+        self.assertTrue(queries)
+        self.assertTrue(any("trading" in q or "market" in q or "chart" in q for q in queries))
+        self.assertFalse(any("50000" in q.replace(" ", "") for q in queries))
 
     def test_neutral_cta_guard(self):
         from config import Settings
@@ -132,11 +136,14 @@ class CoreTests(unittest.TestCase):
         gen = ScriptGenerator(cfg)
         topic = Topic("Спред", "facts", "q", "fp", "curated", kind="evergreen")
         base = [
-            Scene("Спред — разница между лучшей ценой покупки и продажи.", "trading market smartphone", "СПРЕД", "graphic"),
-            Scene("Он может быть уже или шире в разных условиях, поэтому перед сделкой полезно смотреть обе стороны цены.", "financial market tablet", "РАЗНИЦА", "stock"),
-            Scene("Это не отдельная комиссия биржи: спред возникает как разница между лучшей заявкой на покупку и лучшей заявкой на продажу.", "trader hands smartphone", "НЕ КОМИССИЯ", "graphic"),
-            Scene("Для крупных ордеров важна и глубина стакана, потому что одна лучшая цена не показывает весь доступный объём рядом.", "trading desk tablet", "ГЛУБИНА", "stock"),
-            Scene("Проверяй цену до подтверждения. Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone finance", "ПРОФИЛЬ", "graphic"),
+            Scene("Спред — разница между лучшей ценой покупки и продажи.", "trading market smartphone", "СПРЕД", "stock"),
+            Scene("Bid — лучшая доступная цена покупки.", "trader smartphone finance", "BID", "stock"),
+            Scene("Ask — лучшая доступная цена продажи.", "financial trading screen", "ASK", "graphic"),
+            Scene("Это не отдельная комиссия биржи: спред возникает между двумя лучшими заявками.", "trader hands smartphone", "НЕ КОМИССИЯ", "stock"),
+            Scene("В разных условиях рынка эта разница может становиться уже или шире.", "market chart monitor", "МЕНЯЕТСЯ", "stock"),
+            Scene("Для крупных ордеров важна и глубина стакана, потому что одной лучшей цены недостаточно.", "trading desk tablet", "ГЛУБИНА", "stock"),
+            Scene("Поэтому одна цифра на экране не описывает всю доступную ликвидность.", "financial market screen", "НЕ ОДНА ЦИФРА", "stock"),
+            Scene("Проверяй обе стороны цены. Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone finance", "ПРОФИЛЬ", "graphic"),
         ]
         script = Script("t", "Спред — это разница?", base, "Что такое спред", "Коротко о механике спреда.", ["crypto","trading","spread","education","shorts"], "curated")
         gen._validate(script, topic)
@@ -145,6 +152,24 @@ class CoreTests(unittest.TestCase):
         bad_script = Script("t", "Спред — это разница?", bad, "Что такое спред", "Коротко о механике спреда.", ["crypto","trading","spread","education","shorts"], "curated")
         with self.assertRaises(ValueError):
             gen._validate(bad_script, topic)
+
+    def test_market_script_rejects_fake_live_wording(self):
+        from config import Settings
+        gen = ScriptGenerator(Settings(language="ru"))
+        topic = Topic("BTC move", "facts", "q", "fp", "Binance Spot public market data /api/v3/ticker/24hr", kind="market", data={"change_24h": -4.2})
+        scenes = [
+            Scene("BTC только что упал на 4,2% за 24 часа.", "trader smartphone finance", "-4,2% / 24H", "stock"),
+            Scene("Снимок показывает движение за скользящее окно.", "financial trading screen", "24H", "stock"),
+            Scene("Это не объясняет причину движения.", "market chart monitor", "БЕЗ ПРИЧИНЫ", "stock"),
+            Scene("Нужно отделять факт цены от догадок.", "analyst computer finance", "ФАКТЫ", "stock"),
+            Scene("Объём добавляет контекст, но не прогноз.", "trading screens finance", "КОНТЕКСТ", "stock"),
+            Scene("Снимок сам по себе не говорит, куда цена пойдёт дальше.", "trader market screen", "НЕ ПРОГНОЗ", "stock"),
+            Scene("Полезнее читать несколько метрик вместе, а не одну цифру.", "financial data screen", "НЕ ОДНА МЕТРИКА", "stock"),
+            Scene("Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "finance smartphone", "ПРОФИЛЬ", "graphic"),
+        ]
+        script = Script("t", "BTC только что упал на 4,2% за 24 часа.", scenes, "BTC за 24 часа", "Данные Binance за 24 часа.", ["BTC","crypto","Binance","market","shorts"], topic.source)
+        with self.assertRaises(ValueError):
+            gen._validate(script, topic)
 
     def test_model_cta_and_query_are_sanitized(self):
         from config import Settings

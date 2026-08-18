@@ -45,7 +45,7 @@ class Settings:
     script_candidates: int = _int("SCRIPT_CANDIDATES", 3)
     topic_mode: str = os.getenv("TOPIC_MODE", "mixed").strip().lower()
     video_min_seconds: int = _int("VIDEO_MIN_SECONDS", 34)
-    video_max_seconds: int = _int("VIDEO_MAX_SECONDS", 52)
+    video_max_seconds: int = _int("VIDEO_MAX_SECONDS", 48)
     recent_topic_limit: int = _int("RECENT_TOPIC_LIMIT", 60)
     recent_hook_limit: int = _int("RECENT_HOOK_LIMIT", 80)
     recent_media_limit: int = _int("RECENT_MEDIA_LIMIT", 140)
@@ -57,7 +57,7 @@ class Settings:
     # Voice
     voice_provider: str = os.getenv("VOICE_PROVIDER", "edge").strip().lower()
     edge_voice: str = os.getenv("EDGE_VOICE", "auto").strip()
-    edge_rate: str = os.getenv("EDGE_RATE", "+4%").strip()
+    edge_rate: str = os.getenv("EDGE_RATE", "+6%").strip()
     elevenlabs_api_key: str = os.getenv("ELEVENLABS_API_KEY", "").strip()
     elevenlabs_voice_id: str = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
     elevenlabs_model: str = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.4.0 — Cinematic visual rebuild
+
+- Removed the slide/card visual system from market Shorts.
+- Market Shorts now use 8–9 fast scenes, stock-first footage and kinetic metric typography.
+- Rebuilt generated fallback as full-screen text-free chart/order-flow/network backgrounds with multiple visual variants.
+- Added safer Pexels query fallbacks and explicit rejection of unrelated lifestyle footage.
+- Made market scripts stock-first: exact numbers are overlaid by the editor instead of being faked inside footage.
+- Added recognizable/liquid Binance asset filtering so tiny high-volatility pairs do not dominate topic selection.
+- Added 24h range and price-position context for more useful market storytelling.
+- Rejected fake live/calendar language such as “just now”, “today”, “вчера”, and empty finance clichés.
+- Tightened narration pacing and improved caption grouping around time/currency/quantity units.
+- Rebuilt hook, metric, caption and CTA typography with no giant black UI boxes.
+
 ## 2.3.0 — Visual/timing quality pass
 
 - Removed the `-shortest` final-mux failure mode; video and audio are padded/trimmed to the speech-led target duration.

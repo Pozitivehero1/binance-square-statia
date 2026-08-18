@@ -42,7 +42,7 @@ jobs:
       MISTRAL_MODEL: ${{ vars.MISTRAL_MODEL || 'mistral-large-latest' }}
       VOICE_PROVIDER: ${{ vars.VOICE_PROVIDER || 'edge' }}
       EDGE_VOICE: ${{ vars.EDGE_VOICE || 'auto' }}
-      EDGE_RATE: ${{ vars.EDGE_RATE || '+4%' }}
+      EDGE_RATE: ${{ vars.EDGE_RATE || '+6%' }}
       ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
       ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
       AUTO_UPLOAD: ${{ vars.AUTO_UPLOAD || '0' }}
