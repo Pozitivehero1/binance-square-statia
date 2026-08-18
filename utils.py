@@ -192,10 +192,9 @@ def format_money(value: Any) -> str:
     return f"${v:.8f}".rstrip("0")
 
 
-def validate_render(path: Path, expected_width: int, expected_height: int, min_seconds: float, max_seconds: float) -> dict[str, Any]:
+def validate_render(path: Path, expected_width: int, expected_height: int, min_seconds: float, max_seconds: float, *, expected_duration: float | None = None, min_audio_seconds: float | None = None) -> dict[str, Any]:
     # Scale the sanity threshold with resolution and requested duration so tiny CI
-    # smoke renders are not flaky while production 1080x1920 renders still get a
-    # meaningful corruption/empty-file check.
+    # smoke renders are not flaky while production renders still get a corruption check.
     min_bytes = max(50_000, int(expected_width * expected_height * max(min_seconds, 1.0) * 0.004))
     if not path.exists() or path.stat().st_size < min_bytes:
         raise RuntimeError(f"Rendered video is missing or unexpectedly small (<{min_bytes} bytes)")
@@ -211,8 +210,39 @@ def validate_render(path: Path, expected_width: int, expected_height: int, min_s
     duration = float((data.get("format") or {}).get("duration") or 0.0)
     if not (min_seconds - 2.5 <= duration <= max_seconds + 2.5):
         raise RuntimeError(f"Unexpected render duration: {duration:.2f}s")
+
+    if expected_duration is not None:
+        # More than a few frames of drift indicates that the video/audio track ended early.
+        tolerance = max(0.14, expected_duration * 0.004)
+        if abs(duration - expected_duration) > tolerance:
+            raise RuntimeError(
+                f"Render duration drift: expected {expected_duration:.3f}s, got {duration:.3f}s"
+            )
+
+    def stream_duration(stream: dict[str, Any]) -> float:
+        try:
+            value = float(stream.get("duration") or 0.0)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+        return duration
+
+    audio_duration = stream_duration(audio)
+    video_duration = stream_duration(video)
+    if min_audio_seconds is not None and audio_duration + 0.10 < min_audio_seconds:
+        raise RuntimeError(
+            f"Audio track was truncated: speech {min_audio_seconds:.3f}s, rendered audio {audio_duration:.3f}s"
+        )
+    if expected_duration is not None and video_duration + 0.12 < expected_duration:
+        raise RuntimeError(
+            f"Video track ended early: expected {expected_duration:.3f}s, rendered video {video_duration:.3f}s"
+        )
     return {
         "duration": round(duration, 3),
+        "audio_duration": round(audio_duration, 3),
+        "video_duration": round(video_duration, 3),
+        "expected_duration": round(expected_duration, 3) if expected_duration is not None else None,
         "width": width,
         "height": height,
         "video_codec": video.get("codec_name"),

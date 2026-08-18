@@ -22,6 +22,7 @@ class Scene:
     voiceover: str
     visual_query: str
     overlay_text: str
+    visual_mode: str = "auto"  # stock | graphic | auto
 
 
 @dataclass

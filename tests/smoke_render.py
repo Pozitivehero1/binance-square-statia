@@ -30,6 +30,10 @@ def main():
         _, qa = VideoBuilder(cfg).build(script, speech, clips, root, out)
         assert out.exists() and out.stat().st_size > 50_000
         assert qa["width"] == 360 and qa["height"] == 640
+        # Regression guard for the real Actions failure where a 53.2s voice became
+        # a 51.5s MP4 because the visual track ended first.
+        assert qa["duration"] >= speech.duration + 0.65
+        assert qa["audio_duration"] >= speech.duration
         print("SMOKE_RENDER_OK", qa)
 
 

@@ -1,190 +1,154 @@
-# Crypto Shorts Bot 2.2 Production
+# Crypto Shorts Bot 2.3 Production
 
-Бот «под ключ» для автоматической сборки оригинальных вертикальных YouTube Shorts о крипто-механике и рыночных данных с мягким CTA на реферальную ссылку Binance.
+Автоматический бот для вертикальных YouTube Shorts о крипто-механике и публичных рыночных данных Binance. Генерирует сценарий, озвучку, видеоряд/инфографику, субтитры, финальный MP4, метаданные и при необходимости загружает ролик на YouTube.
 
-## Что усилено в 2.2
+## Что нужно для запуска
 
-- Генерирует **3 редакционных варианта** сценария и выбирает лучший локальным quality-score вместо публикации первого ответа LLM.
-- Сценарий состоит из **5–7 смысловых сцен**: отдельный voice-over, отдельный видеозапрос и короткий экранный тезис для каждой сцены.
-- Контроль повторяемости: история тем, хуков и Pexels video ID между запусками.
-- Binance Spot: публичные 24h rolling данные по USDT-парам — цена, изменение, high/low, quote volume, weighted average и число сделок. API-ключ Binance не нужен; причины движения не выдумываются.
-- Pexels выбирается **по сценам**, а не случайным пулом. При ошибке/лимите/отсутствии ключа бот сам создаёт локальный абстрактный визуал и продолжает работу.
-- Edge TTS и ElevenLabs теперь возвращают **тайминги речи**. Для ElevenLabs используется endpoint `with-timestamps`; для Edge — WordBoundary.
-- Субтитры привязаны к речи, а не распределены по тексту «на глаз»; длинные русские фразы адаптивно переносятся и не вылезают за края кадра.
-- Экранный hook, scene beats, динамические captions и отдельный CTA.
-- Voice mastering: high-pass/low-pass, compression и loudness normalization. Музыка при наличии тихо подмешивается под голос; битый музыкальный файл автоматически исключается, не ломая весь рендер.
-- Рендер проходит автоматический QA через `ffprobe`: размер, длительность, аудио/видео потоки, кодеки.
-- Если YouTube upload упал, готовый MP4 **не теряется**.
-- Если одна попытка генерации упала, бот делает до `GENERATION_ATTEMPTS` попыток с другой темой.
-- Выводит `.mp4`, `.json` и `.srt`.
-- GitHub Actions имеет удобные мобильные inputs: количество роликов, принудительная тема, переключатель YouTube upload.
-- CTA оптимизирован под реальный Shorts UX: «ссылка в профиле», потому что URL в описании Shorts некликабельны.
-
-## Минимум для запуска
-
-1. Python 3.11+ и FFmpeg.
-2. Скопировать `.env.example` в `.env`.
-3. Заполнить:
-
-```env
-MISTRAL_API=...
-REFERRAL_URL=https://...
-```
-
-`PEXELS_API_KEY` теперь не является точкой отказа: без него визуалы будут созданы локально. Но для более живого видеоряда Pexels рекомендуется.
-
-Рыночные темы берутся из публичного Binance Spot market-data endpoint `https://data-api.binance.vision/api/v3/ticker/24hr`; отдельный Binance API key не требуется. Если endpoint временно недоступен, `mixed` автоматически продолжит работу на evergreen-темах.
-
-По умолчанию выбран `mistral-large-latest` для качества сценария. Если важнее снизить стоимость API, можно заменить `MISTRAL_MODEL` на `mistral-small-latest`.
-
-## Windows
-
-Первый раз:
+Обязательные GitHub Actions Secrets:
 
 ```text
-setup_windows.bat
+MISTRAL_API
+REFERRAL_URL
 ```
 
-Потом:
+Рекомендуемый, но необязательный Secret:
 
 ```text
-run_windows.bat
+PEXELS_API_KEY
 ```
 
-## Linux / macOS
+Для рыночных тем отдельный Binance API key **не нужен**: бот использует публичные Binance Spot market-data endpoints. Если Pexels недоступен, ролик всё равно собирается на собственных локальных визуалах.
 
-```bash
-cp .env.example .env
-# заполнить .env
-bash run.sh
-```
+По умолчанию бренд CTA — Binance, отдельной переменной `EXCHANGE_NAME` нет.
 
-## Docker
+## Что делает версия 2.3
 
-```bash
-docker build -t crypto-shorts-bot .
-docker run --rm --env-file .env -v "$PWD/output:/app/output" -v "$PWD/music:/app/music:ro" crypto-shorts-bot
-```
-
-`.dockerignore` исключает `.env`, OAuth-файлы, state, output и локальное окружение из build context.
-
-## Команды
-
-```bash
-python main.py                    # 1 автоматическая тема
-python main.py --count 3          # 3 ролика
-python main.py --topic "Funding rate"  # своя тема
-python main.py --no-upload        # никогда не грузить на YouTube
-python main.py --keep-work        # оставить промежуточные файлы
-python main.py --self-test        # FFmpeg/libass check, без API
-```
-
-## Голос
-
-По умолчанию:
-
-```env
-VOICE_PROVIDER=edge
-EDGE_VOICE=auto
-EDGE_RATE=+4%
-TTS_FALLBACK=1
-```
-
-`EDGE_VOICE=auto` автоматически выбирает русский голос для `LANGUAGE=ru` и английский для `LANGUAGE=en`; при желании можно указать конкретное имя Edge-голоса.
-
-Если основной TTS-провайдер недоступен, бот попробует резервный: ElevenLabs — только когда его ключ и voice ID заполнены; Edge может быть резервом для ElevenLabs.
-
-Для ElevenLabs:
-
-```env
-VOICE_PROVIDER=elevenlabs
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
-```
-
-ElevenLabs используется через API с timestamp alignment, чтобы субтитры шли по речи.
-
-## Музыка
-
-Положить **только музыку, на которую есть право коммерческого использования**, в `music/` (`mp3`, `wav`, `m4a`, `aac`). Если папка пустая, бот прекрасно работает без музыки. Громкость задаёт `MUSIC_VOLUME`.
-
-## Важно: куда вести реферальный трафик
-
-YouTube делает обычные URL в **описаниях и комментариях Shorts некликабельными**. Поэтому версия 2.2 не говорит зрителю «ссылка в описании»: CTA в голосе и на экране ведёт на **первую ссылку в профиле канала**.
-
-Перед первым запуском с реферальным CTA один раз добавьте `REFERRAL_URL` в YouTube Studio → Customization / Настройка канала → Profile / Профиль → Links / Ссылки и поставьте её первой. Сам URL всё равно дублируется в описании вместе с referral disclosure, но основной кликабельный путь — профиль канала.
-
-## YouTube OAuth
-
-1. В Google Cloud включить YouTube Data API v3.
-2. Создать OAuth Desktop App.
-3. Сохранить JSON как `client_secret.json`.
-4. Один раз на компьютере с браузером:
-
-```bash
-python youtube_auth.py
-```
-
-5. Появится `token.json`.
-
-> Если вы обновились с версии бота, где OAuth запрашивал только `youtube.upload`, удалите старый `token.json` и один раз снова запустите `youtube_auth.py`: в 2.2 дополнительно используется scope `youtube.force-ssl` для установки disclosure paid promotion.
-
-6. В `.env`:
-
-```env
-AUTO_UPLOAD=1
-YOUTUBE_PRIVACY=private
-```
-
-По умолчанию `YOUTUBE_PAID_PROMOTION=1`: проект построен вокруг коммерческой реферальной ссылки, поэтому uploader после загрузки пытается выставить YouTube paid-promotion/commercial-relationship flag. В описании независимо от этого всегда остаётся явный referral disclosure.
-
-Учтите: YouTube может принудительно оставлять API-загрузки `private` для непроверенных API-проектов до прохождения аудита проекта. Это ограничение YouTube, а не бота.
-
-`YOUTUBE_SYNTHETIC_MEDIA=0` не меняйте автоматически: включайте его только если конкретный визуальный контент подпадает под требования YouTube к disclosure синтетически созданного/существенно изменённого реалистичного контента.
+- Mistral создаёт несколько редакционных вариантов сценария, бот валидирует их и выбирает лучший.
+- Для каждого эпизода сценарий задаёт `visual_mode`: `stock` или `graphic`, поэтому ролик не превращается ни в случайную нарезку stock, ни в семь одинаковых карточек.
+- Точные числа, bid/ask, spread, order book, data cards и CTA отрисовываются локально. Stock-видео не используется там, где оно не может честно показать конкретную информацию.
+- Pexels проходит дополнительную relevance-проверку по человекочитаемому slug результата. Очевидно нерелевантный ролик вроде одежды/лайфстайла для trading-сцены отклоняется и заменяется контролируемым визуалом.
+- Stock search-запросы автоматически очищаются от невозможных указаний вроде `split-screen`, точных цен, `highlighted`, `animation`, Binance/logo и слишком длинных описаний.
+- Финальный CTA нормализуется кодом, а не доверяется модели: русская версия заканчивается фразой `Хочешь посмотреть Binance? Первая ссылка — в профиле канала.` Без обещаний низких спредов, лучших комиссий, бонусов или доходности.
+- Для evergreen-тем есть локальные content-guards против типичных правдоподобных, но неточных упрощений.
+- Edge TTS/ElevenLabs дают тайминги слов; пунктуация возвращается из исходного текста, а captions собираются по смысловым фразам.
+- SRT/ASS captions имеют строго монотонные непересекающиеся интервалы.
+- Числа вида `50 000` не разрываются между соседними субтитрами.
+- Финальная длительность теперь определяется голосом: видеоряд при необходимости дотягивается последним кадром, аудио дополняется тишиной, затем оба потока жёстко trim'ятся к одной длительности. `-shortest` больше не может обрезать конец озвучки.
+- FFprobe QA сверяет фактическую длительность с ожидаемой и отдельно проверяет, что аудиодорожка не короче исходной речи.
+- Если YouTube upload не удался, уже готовый MP4/JSON/SRT сохраняются.
+- Если отдельная генерация упала, бот повторяет попытку, а пакет из нескольких Shorts не теряет уже готовые результаты.
 
 ## GitHub Actions с телефона
 
-Workflow: `.github/workflows/shorts.yml`.
+Открой репозиторий → **Settings → Secrets and variables → Actions**.
 
 ### Secrets
 
 Обязательные:
 
-- `MISTRAL_API`
-- `REFERRAL_URL`
+```text
+MISTRAL_API
+REFERRAL_URL
+```
 
-Рекомендуемые:
+Рекомендуемый:
 
-- `PEXELS_API_KEY`
+```text
+PEXELS_API_KEY
+```
 
 Опциональные:
 
-- `ELEVENLABS_API_KEY`
-- `ELEVENLABS_VOICE_ID`
-- `YOUTUBE_CLIENT_SECRET_B64`
-- `YOUTUBE_TOKEN_B64`
+```text
+ELEVENLABS_API_KEY
+ELEVENLABS_VOICE_ID
+YOUTUBE_CLIENT_SECRET_B64
+YOUTUBE_TOKEN_B64
+```
 
 ### Variables
 
-Обязательных Variables нет: бренд Binance уже зафиксирован в проекте.
-
-Опциональные: `LANGUAGE`, `MISTRAL_MODEL`, `VOICE_PROVIDER`, `EDGE_VOICE`, `EDGE_RATE`, `AUTO_UPLOAD`, `YOUTUBE_PRIVACY`, `YOUTUBE_PAID_PROMOTION`, `YOUTUBE_SYNTHETIC_MEDIA`.
-
-В Actions → **Generate Crypto Shorts → Run workflow** появятся три поля: число роликов, тема (можно оставить пустой), и Upload to YouTube.
-
-## Что появляется в output/
+Ничего обязательного нет. При желании можно задать:
 
 ```text
-20260818_120000_topic.mp4
-20260818_120000_topic.json
-20260818_120000_topic.srt
+LANGUAGE=ru
+MISTRAL_MODEL=mistral-large-latest
+VOICE_PROVIDER=edge
+EDGE_VOICE=auto
+EDGE_RATE=+4%
+AUTO_UPLOAD=0
+YOUTUBE_PRIVACY=private
+YOUTUBE_PAID_PROMOTION=1
+YOUTUBE_SYNTHETIC_MEDIA=0
 ```
 
-JSON содержит сценарий по сценам, фактическую основу, media credits, script quality score, FFprobe QA и информацию о загрузке.
+Затем: **Actions → Generate Crypto Shorts → Run workflow**. Можно выбрать количество роликов, принудительную тему и загрузку на YouTube.
 
-## Важные практические правила
+## Локальный запуск
 
-- Не добавляйте в prompt/тему несуществующие бонусы или гарантированную доходность.
-- Проверяйте условия конкретной реферальной программы биржи и применимое законодательство к рекламе финансовых/крипто-сервисов.
-- Pexels API используется через `/v1/videos/search`; если его материалы реально использованы, описание содержит ссылку на Pexels и credits.
-- Чтобы канал не превращался в однообразную фабрику, не ставьте слишком высокую частоту публикаций сразу. Сначала посмотрите, какие форматы реально удерживают зрителя, и только затем масштабируйте.
+```bash
+cp .env.example .env
+# заполнить MISTRAL_API и REFERRAL_URL
+bash run.sh
+```
+
+Windows: первый запуск `setup_windows.bat`, затем `run_windows.bat`.
+
+Основные команды:
+
+```bash
+python main.py
+python main.py --count 3
+python main.py --topic "Funding rate"
+python main.py --no-upload
+python main.py --self-test
+```
+
+## Голос
+
+По умолчанию используется Edge TTS без отдельного ключа:
+
+```text
+VOICE_PROVIDER=edge
+EDGE_VOICE=auto
+EDGE_RATE=+4%
+```
+
+Можно подключить ElevenLabs через `ELEVENLABS_API_KEY` и `ELEVENLABS_VOICE_ID`. При включённом `TTS_FALLBACK=1` бот использует резервный доступный провайдер при ошибке основного.
+
+## YouTube upload
+
+Для автоматической публикации нужен официальный OAuth YouTube. Сначала один раз создаётся `token.json` через:
+
+```bash
+python youtube_auth.py
+```
+
+Для GitHub Actions `client_secret.json` и `token.json` передаются как base64 Secrets `YOUTUBE_CLIENT_SECRET_B64` и `YOUTUBE_TOKEN_B64`.
+
+По умолчанию `AUTO_UPLOAD=0`, поэтому обычный запуск только генерирует артефакт. Ссылка для зрителя ведёт в профиль канала; сам `REFERRAL_URL` также добавляется в описание вместе с referral disclosure.
+
+## Результат
+
+В `output/` появляются:
+
+```text
+<timestamp>_<title>.mp4
+<timestamp>_<title>.json
+<timestamp>_<title>.srt
+```
+
+JSON содержит сценарий по сценам, тип визуала, источник данных, media credits, качество сценария, длительность голоса, фактическую длительность видео и FFprobe QA.
+
+## Проверки перед релизом 2.3
+
+Проект должен проходить:
+
+```bash
+python -m compileall -q .
+python -m unittest discover -s tests -p 'test_*.py' -v
+python main.py --self-test
+python tests/smoke_render.py
+```
+
+Smoke-render специально проверяет регрессию, при которой голос мог быть длиннее итогового MP4.

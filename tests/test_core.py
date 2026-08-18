@@ -7,6 +7,7 @@ from models import Script, Scene, SpeechResult, WordTiming, Topic
 from tts import alignment_to_words
 from script_generator import ScriptGenerator
 from topic_source import TopicSource
+from media import MediaProvider
 from utils import request_with_retry, similarity
 from video_builder import ass_wrap, caption_cues, scene_windows
 
@@ -97,6 +98,64 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(item["symbol"], "BTCUSDT")
         self.assertEqual(item["quote_asset"], "USDT")
         self.assertAlmostEqual(item["change_24h"], -4.2)
+
+    def test_caption_cues_preserve_punctuation_and_never_overlap(self):
+        narration = "Спред — это разница. Чем он меньше, тем обычно уже рынок."
+        tokens = "Спред это разница Чем он меньше тем обычно уже рынок".split()
+        words = [WordTiming(t, i * .42, i * .42 + .34) for i, t in enumerate(tokens)]
+        cues = caption_cues(words, narration, 5.5)
+        joined = " ".join(t for _, _, t in cues)
+        self.assertIn("разница.", joined)
+        self.assertIn("меньше,", joined)
+        for left, right in zip(cues, cues[1:]):
+            self.assertLessEqual(left[1], right[0])
+        self.assertFalse(any("разница. Чем" in text for _, _, text in cues))
+
+    def test_media_relevance_rejects_unrelated_lifestyle_slug(self):
+        from models import MediaClip
+        bad = MediaClip(1, "trader smartphone market app", pexels_url="https://www.pexels.com/video/person-browsing-clothes-on-laptop-5586010/")
+        good = MediaClip(2, "trader smartphone market app", pexels_url="https://www.pexels.com/video/monitoring-the-stock-market-7947488/")
+        self.assertLess(MediaProvider._relevance(bad, bad.query), 0.42)
+        self.assertGreaterEqual(MediaProvider._relevance(good, good.query), 0.42)
+
+    def test_graphic_routing_for_exact_numbers_and_cta(self):
+        scenes = [
+            Scene("Бид 50 000, аск 50 100. Спред 100 долларов.", "trading numbers screen", "СПРЕД"),
+            Scene("Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone app", "BINANCE"),
+        ]
+        self.assertEqual(MediaProvider._graphic_kind(scenes[0], 0, 2), "orderbook")
+        self.assertEqual(MediaProvider._graphic_kind(scenes[1], 1, 2), "cta")
+
+    def test_neutral_cta_guard(self):
+        from config import Settings
+        cfg = Settings(language="ru")
+        gen = ScriptGenerator(cfg)
+        topic = Topic("Спред", "facts", "q", "fp", "curated", kind="evergreen")
+        base = [
+            Scene("Спред — разница между лучшей ценой покупки и продажи.", "trading market smartphone", "СПРЕД", "graphic"),
+            Scene("Он может быть уже или шире в разных условиях, поэтому перед сделкой полезно смотреть обе стороны цены.", "financial market tablet", "РАЗНИЦА", "stock"),
+            Scene("Это не отдельная комиссия биржи: спред возникает как разница между лучшей заявкой на покупку и лучшей заявкой на продажу.", "trader hands smartphone", "НЕ КОМИССИЯ", "graphic"),
+            Scene("Для крупных ордеров важна и глубина стакана, потому что одна лучшая цена не показывает весь доступный объём рядом.", "trading desk tablet", "ГЛУБИНА", "stock"),
+            Scene("Проверяй цену до подтверждения. Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone finance", "ПРОФИЛЬ", "graphic"),
+        ]
+        script = Script("t", "Спред — это разница?", base, "Что такое спред", "Коротко о механике спреда.", ["crypto","trading","spread","education","shorts"], "curated")
+        gen._validate(script, topic)
+        bad = list(base)
+        bad[-1] = Scene("На Binance низкие спреды. Хочешь посмотреть Binance? Первая ссылка — в профиле канала.", "trader smartphone finance", "ПРОФИЛЬ", "graphic")
+        bad_script = Script("t", "Спред — это разница?", bad, "Что такое спред", "Коротко о механике спреда.", ["crypto","trading","spread","education","shorts"], "curated")
+        with self.assertRaises(ValueError):
+            gen._validate(bad_script, topic)
+
+    def test_model_cta_and_query_are_sanitized(self):
+        from config import Settings
+        gen = ScriptGenerator(Settings(language="ru"))
+        text = "Чтобы торговать с низкими спредами, переходи по ссылке Binance в профиле канала."
+        normalized = gen._normalize_final_voice(text)
+        self.assertEqual(normalized, "Хочешь посмотреть Binance? Первая ссылка — в профиле канала.")
+        q = gen._normalize_visual_query("split-screen Binance app showing 50,000 highlighted BID ASK animation", "graphic")
+        self.assertNotIn("binance", q)
+        self.assertNotIn("50000", q.replace(" ", ""))
+        self.assertNotIn("animation", q)
 
 
 if __name__ == "__main__":

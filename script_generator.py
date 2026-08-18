@@ -21,7 +21,7 @@ class ScriptGenerator:
         self.session.headers.update({
             "Authorization": f"Bearer {cfg.mistral_api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "CryptoShortsBot/2.1",
+            "User-Agent": "CryptoShortsBot/2.3",
         })
 
     def create(self, topic: Topic, recent_hooks: list[str] | None = None, *, length_feedback: str = "") -> Script:
@@ -55,18 +55,20 @@ NON-NEGOTIABLE EDITORIAL RULES
 - First spoken sentence must create a specific information gap in <= 12 words and <= 64 characters; no fake urgency.
 - hook MUST be an exact copy of the first spoken sentence in scenes[0].voiceover.
 - Every scene advances the idea. No greetings, filler, "today we will", generic motivation, or repeated conclusions.
-- Use 5-7 scenes. Each scene has 1-3 short spoken sentences and one matching English stock-video query.
+- Use 5-7 scenes. Each scene has 1-3 short spoken sentences, one matching English visual_query and visual_mode.
+- visual_mode must be "stock" for real-world footage a stock library can plausibly show (hands using phone, cybersecurity, trader at desk), or "graphic" for mechanisms, comparisons, exact numbers, order books and data. Use a healthy mix: normally at least 2 stock scenes and at least 2 graphic scenes; final scene is graphic.
 - overlay_text is a punchy 1-5 word phrase in the narration language, not a full subtitle.
 - For market topics, only use the supplied numbers. Never invent a catalyst, news story, quote, support/resistance level, or future price.
 - Market data is a retrieval snapshot: use rolling-window wording (1h/24h/7d), not "today", "right now", or claims that it is live at publication time.
 - Never instruct the viewer to buy/sell a specific asset and never promise returns, bonuses or profit.
-- Final scene: useful takeaway first, then a soft CTA using this exact destination concept: the {self.cfg.exchange_name} link is in the channel profile. Do not say the link is clickable in the Shorts description. Do not call it risk-free or profitable.
+- Final scene: useful takeaway first, then end with this exact neutral CTA sentence: "Хочешь посмотреть Binance? Первая ссылка — в профиле канала." for Russian, or "Want to explore Binance? The first link is in the channel profile." for English. Do not attach performance, fee, spread, bonus, profit, safety or superiority claims to Binance.
 - Do not read legal/referral disclosure aloud; the app adds it to the description.
 - title <= 70 characters, accurate but curiosity-driven.
 - description: 1-2 compact lines, no URL, no hashtags.
 - tags: 5-8 plain tags, one must be shorts.
 - source_note must name only the factual basis provided above.
-- visual_query must describe concrete footage (phone, charts, trader hands, cybersecurity, server screens etc.), no brand logos, copyrighted characters, or text-heavy screenshots.
+- visual_query is a concise English visual search/brief phrase: 3-9 simple words. For stock mode, good: "trader hands smartphone market app". Never request split-screen, highlighted text, animation instructions, Binance/logo footage, or full sentences. For graphic mode, describe the concept (for example "bid ask order book spread"); exact numeric values come from voiceover and are rendered locally.
+- For evergreen topics, every factual claim must be directly supported by Context. Paraphrase the supplied mechanics; do not invent a new definition, benefit or causal claim.
 - Make the variants structurally different, not paraphrases.
 
 Return JSON only, matching the requested schema.
@@ -134,8 +136,9 @@ Return JSON only, matching the requested schema.
                 "voiceover": {"type": "string"},
                 "visual_query": {"type": "string"},
                 "overlay_text": {"type": "string"},
+                "visual_mode": {"type": "string", "enum": ["stock", "graphic"]},
             },
-            "required": ["voiceover", "visual_query", "overlay_text"],
+            "required": ["voiceover", "visual_query", "overlay_text", "visual_mode"],
         }
         variant = {
             "type": "object",
@@ -159,6 +162,37 @@ Return JSON only, matching the requested schema.
             "required": ["variants"],
         }
 
+    def _required_cta(self) -> str:
+        return (
+            "Хочешь посмотреть Binance? Первая ссылка — в профиле канала."
+            if self.cfg.language == "ru"
+            else "Want to explore Binance? The first link is in the channel profile."
+        )
+
+    def _normalize_final_voice(self, text: str) -> str:
+        """Strip model-written referral sales copy and append the neutral CTA deterministically."""
+        required = self._required_cta()
+        chunks = [x.strip() for x in re.split(r"(?<=[.!?…])\s+", clean_spaces(text)) if x.strip()]
+        referral_markers = ("binance", "ссыл", "профил", "link", "profile", "реферал", "referral")
+        kept = [x for x in chunks if not any(m in x.lower() for m in referral_markers)]
+        prefix = " ".join(kept).strip()
+        return (prefix + " " + required).strip()
+
+    @staticmethod
+    def _normalize_visual_query(text: str, mode: str) -> str:
+        q = str(text or "").lower()
+        q = re.sub(r"[\"'“”‘’]", " ", q)
+        q = re.sub(r"\b(split[- ]screen|highlighted?|animation|animated|showing|displaying|exact|binance|logo)\b", " ", q)
+        q = re.sub(r"\b\d[\d,.]*\b", " ", q)
+        q = re.sub(r"[^a-z0-9 -]+", " ", q)
+        words = [w for w in q.split() if w not in {"the", "a", "an", "of", "with", "and"}]
+        if mode == "stock" and not any(w in words for w in ("trader", "trading", "finance", "market", "phone", "smartphone", "tablet", "computer", "security", "cyber")):
+            words.extend(["finance", "smartphone"])
+        words = words[:9]
+        if len(words) < 2:
+            return "trader smartphone finance" if mode == "stock" else "crypto market concept"
+        return " ".join(words)
+
     def _parse_variant(self, raw: Any, topic: Topic) -> Script:
         if not isinstance(raw, dict):
             raise ValueError("variant is not an object")
@@ -170,12 +204,22 @@ Return JSON only, matching the requested schema.
             if not isinstance(x, dict):
                 continue
             voice = clean_spaces(x.get("voiceover", ""))
-            query = clean_spaces(x.get("visual_query", ""))
             overlay = clean_spaces(x.get("overlay_text", ""))
+            mode = clean_spaces(x.get("visual_mode", "auto")).lower()
+            if mode not in {"stock", "graphic"}:
+                mode = "auto"
+            query = self._normalize_visual_query(x.get("visual_query", ""), "stock" if mode == "stock" else "graphic")
             if voice and query:
-                scenes.append(Scene(voiceover=voice, visual_query=query[:100], overlay_text=overlay[:60]))
+                scenes.append(Scene(voiceover=voice, visual_query=query[:160], overlay_text=overlay[:60], visual_mode=mode))
         if not scenes:
             raise ValueError("no valid scenes")
+        # Structured output normally supplies modes, but a deterministic fallback is
+        # safer than throwing away an otherwise excellent paid generation.
+        for i, scene in enumerate(scenes):
+            if scene.visual_mode == "auto":
+                scene.visual_mode = "graphic" if i == len(scenes) - 1 or i % 2 == 0 else "stock"
+        scenes[-1].visual_mode = "graphic"
+        scenes[-1].voiceover = self._normalize_final_voice(scenes[-1].voiceover)
 
         # The visible hook must be the sentence the viewer actually hears first.
         spoken_hook = re.split(r"(?<=[.!?…])\s+", scenes[0].voiceover, maxsplit=1)[0].strip()
@@ -231,16 +275,37 @@ Return JSON only, matching the requested schema.
         if len({x.visual_query.lower() for x in s.scenes}) < 4:
             raise ValueError("visual queries are too repetitive")
 
-        # The final scene must actually execute the business objective, while staying soft/non-misleading.
-        cta = s.scenes[-1].voiceover.lower()
-        brand = self.cfg.exchange_name.lower()
-        if self.cfg.language == "ru":
-            if brand not in cta or "ссыл" not in cta or "профил" not in cta:
-                raise ValueError("final scene is missing the required channel-profile referral CTA")
-        else:
-            if brand not in cta or "link" not in cta or "profile" not in cta:
-                raise ValueError("final scene is missing the required channel-profile referral CTA")
+        # The last CTA is intentionally fixed and neutral. This prevents the model from
+        # inventing exchange advantages such as "low spreads", "best fees" or bonuses.
+        cta = s.scenes[-1].voiceover.strip()
+        required_cta = self._required_cta()
+        if not cta.endswith(required_cta):
+            raise ValueError("final scene must end with the exact neutral Binance profile CTA")
+        promo_terms = (
+            "низк", "дешев", "выгод", "лучш", "быстр", "бонус", "скидк", "гарант", "безопасн",
+            "low spread", "lowest", "best fee", "cheapest", "bonus", "discount", "guaranteed", "safest",
+        )
+        cta_prefix = cta[:-len(required_cta)].lower()
+        if any(term in cta_prefix for term in promo_terms):
+            raise ValueError("final scene contains an unsupported promotional Binance claim")
 
+        modes = [scene.visual_mode for scene in s.scenes]
+        if any(mode not in {"stock", "graphic"} for mode in modes):
+            raise ValueError("every generated scene must choose stock or graphic visual_mode")
+        if modes[-1] != "graphic":
+            raise ValueError("final CTA scene must use graphic visual_mode")
+        if len(s.scenes) >= 5 and modes.count("graphic") < 2:
+            raise ValueError("visual plan needs at least two controlled graphic scenes")
+
+        for scene in s.scenes:
+            query_words = re.findall(r"[A-Za-z0-9]+", scene.visual_query)
+            if not (2 <= len(query_words) <= 12):
+                raise ValueError("visual_query must be a compact stock-search phrase")
+            if re.search(r"\b(split[- ]screen|highlighted|animation|animated|binance|logo)\b", scene.visual_query, flags=re.I):
+                raise ValueError("visual_query contains stock-search-hostile shot directions or branding")
+
+        if topic.kind == "evergreen":
+            self._validate_evergreen_claims(s, topic)
         if topic.kind == "market":
             self._validate_market_percentages(s.narration, topic)
             self._validate_market_money_claims(s.narration, topic)
@@ -250,6 +315,29 @@ Return JSON only, matching the requested schema.
         s.tags[:] = list(dict.fromkeys(s.tags))[:8]
         if len(s.tags) < 5:
             raise ValueError("at least 5 unique tags are required after normalization")
+
+    @staticmethod
+    def _validate_evergreen_claims(script: Script, topic: Topic) -> None:
+        """Local guards for high-risk simplifications that frequently sound plausible."""
+        text = script.narration.lower()
+        title = topic.title.lower()
+        if "spread" in title or "спред" in title:
+            forbidden = (
+                "стоимость ликвидности", "цена ликвидности", "instant cost of liquidity",
+                "узкий спред — быстрые сделки", "узкий спред — это быстрые сделки",
+                "narrow spread means fast trades", "гарантирует быстрое исполнение",
+            )
+            if any(x in text for x in forbidden):
+                raise ValueError("spread explanation contains an unsupported/misleading simplification")
+            if "комисси" in text and not re.search(r"не[^.!?]{0,32}комисси", text):
+                raise ValueError("spread must not be described as an exchange commission")
+        if "stablecoin" in title or "стейблкоин" in title:
+            if re.search(r"(?:полностью|абсолютно) безопас|risk[- ]free|same as cash", text):
+                raise ValueError("stablecoin explanation overstates safety")
+        if "2fa" in title and re.search(r"гарантирует|guarantees|100%", text):
+            raise ValueError("2FA explanation overstates protection")
+        if ("leverage" in title or "плеч" in title) and re.search(r"ликвидац[^.]{0,25}ровно|liquidat[^.]{0,25}exactly", text):
+            raise ValueError("leverage explanation invents an exact liquidation rule")
 
     @staticmethod
     def _validate_market_percentages(text: str, topic: Topic) -> None:
@@ -370,7 +458,7 @@ Return JSON only, matching the requested schema.
         if len(set(overlays)) >= 4:
             score += 3
         cta = s.scenes[-1].voiceover.lower()
-        cta_tokens = [self.cfg.exchange_name.lower(), "ссылк", "профил", "link", "profile"]
+        cta_tokens = [self.cfg.exchange_name.lower(), "первая ссылка", "профил", "first link", "profile"]
         if sum(1 for x in cta_tokens if x and x in cta) >= 2:
             score += 5
         return max(0.0, min(100.0, score))
